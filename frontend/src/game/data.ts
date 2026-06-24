@@ -370,45 +370,91 @@ export const QUESTS: Quest[] = [
   { id: "q13", title: "Pirate's Citrus",      description: "Defeat Acid Tralalero on Layer 7.", requiredLayer: 7, targetNPC: "v13-4", targetObjective: "Defeat Layer 7 enemy", reward: 175, isAccepted: false, isCompleted: false },
 ];
 
-// ---------- TRAPS PER MAP ----------
-// kind: spike (HP drain), coin (coin drain). value = drain amount.
+// ---------- TRAPS PER MAP (legacy, kept for compatibility) ----------
 export interface TrapDef { col: number; row: number; kind: "spike" | "coin"; value: number }
-export const TRAPS_BY_MAP: Record<number, TrapDef[]> = {
-  // Realm (map id = 1)
-  1: [
-    { col: 4,  row: 4,  kind: "spike", value: 20 },
-    { col: 8,  row: 6,  kind: "spike", value: 25 },
-    { col: 3,  row: 11, kind: "coin",  value: 5 },
-    { col: 9,  row: 12, kind: "spike", value: 30 },
-    { col: 4,  row: 15, kind: "coin",  value: 10 },
+export const TRAPS_BY_MAP: Record<number, TrapDef[]> = {};
+
+// ---------- PUZZLES PER MAP ----------
+export interface PuzzleDef {
+  id: string;
+  col: number; row: number;
+  kind: "riddle" | "pattern";
+  prompt: string;
+  choices: string[];
+  answer: number; // index of correct choice
+  reward: number;
+}
+export const PUZZLES_BY_MAP: Record<number, PuzzleDef[]> = {
+  // Layer 1 walkable map (id 101)
+  101: [
+    { id: "p1-1", col: 4, row: 4,  kind: "riddle", prompt: "What grows louder the more you ignore it?",
+      choices: ["A whisper", "Brainrot", "Silence", "Espresso"], answer: 1, reward: 25 },
+    { id: "p1-2", col: 4, row: 12, kind: "pattern", prompt: "Pattern: 🍝 🥖 🍝 🥖 🍝 ?",
+      choices: ["🥖", "🍝", "☕", "🍒"], answer: 0, reward: 30 },
+    { id: "p1-3", col: 4, row: 20, kind: "riddle", prompt: "Which element counters Ground?",
+      choices: ["Fire", "Water", "Nature", "Light"], answer: 2, reward: 35 },
   ],
-  // Hubs scale with element: spike + coin
-  10: [
-    { col: 4, row: 4,  kind: "spike", value: 15 },
-    { col: 6, row: 6,  kind: "coin",  value: 5 },
-    { col: 4, row: 9,  kind: "spike", value: 20 },
-    { col: 7, row: 10, kind: "coin",  value: 8 },
+  102: [
+    { id: "p2-1", col: 4, row: 4,  kind: "riddle", prompt: "Ground beats…?", choices: ["Water", "Fire", "Light", "Nature"], answer: 1, reward: 40 },
+    { id: "p2-2", col: 4, row: 12, kind: "pattern", prompt: "Pattern: ▲ ■ ▲ ■ ?", choices: ["▲", "●", "■", "★"], answer: 2, reward: 45 },
+    { id: "p2-3", col: 4, row: 20, kind: "riddle", prompt: "Who is the locked starter?", choices: ["Tung Tung", "Angel Sahur", "Ballerina Cappuccina", "Tralalero"], answer: 1, reward: 50 },
   ],
-  11: [
-    { col: 3, row: 4,  kind: "spike", value: 25 },
-    { col: 6, row: 6,  kind: "spike", value: 25 },
-    { col: 4, row: 9,  kind: "coin",  value: 10 },
-  ],
-  12: [
-    { col: 3, row: 5,  kind: "spike", value: 30 },
-    { col: 6, row: 6,  kind: "spike", value: 35 },
-    { col: 8, row: 9,  kind: "spike", value: 30 },
-    { col: 4, row: 9,  kind: "coin",  value: 12 },
-  ],
-  13: [
-    { col: 3, row: 5,  kind: "spike", value: 30 },
-    { col: 6, row: 4,  kind: "coin",  value: 15 },
-    { col: 7, row: 9,  kind: "spike", value: 35 },
-  ],
+  103: [{ id: "p3-1", col: 4, row: 8, kind: "riddle", prompt: "Damage cap is…?", choices: ["100", "200", "500", "Infinite"], answer: 1, reward: 60 }],
+  104: [{ id: "p4-1", col: 4, row: 8, kind: "riddle", prompt: "Fire counters…?", choices: ["Nature", "Ground", "Water", "Dark"], answer: 2, reward: 70 }],
+  105: [{ id: "p5-1", col: 4, row: 8, kind: "riddle", prompt: "How many save slots?", choices: ["1", "2", "3", "9"], answer: 2, reward: 80 }],
+  106: [{ id: "p6-1", col: 4, row: 8, kind: "riddle", prompt: "Water counters…?", choices: ["Ground", "Fire", "Nature", "Dark"], answer: 2, reward: 90 }],
+  107: [{ id: "p7-1", col: 4, row: 8, kind: "riddle", prompt: "Light's bonus vs Dark/Boss is ×?", choices: ["×0.5", "×1.0", "×1.5", "×2.0"], answer: 3, reward: 100 }],
+  108: [{ id: "p8-1", col: 4, row: 8, kind: "riddle", prompt: "Final boss name?", choices: ["Tung Tung Tung Sahur", "Evil Tung Tung Sahur", "Tralalero", "Cappuccino Assassino"], answer: 1, reward: 120 }],
+  109: [{ id: "p9-1", col: 4, row: 4, kind: "riddle", prompt: "The Throne demands…?", choices: ["Surrender", "Light", "Coffee", "Pasta"], answer: 1, reward: 150 }],
 };
+
+// ---------- LAYER MAPS (walkable hellscape per layer) ----------
+// Each layer map is a small grid 9x24, three sub-sections separated by walls,
+// each section connected by a stair tile.
+export interface LayerMapDef {
+  layerId: number;        // 1..9
+  cols: number;
+  rows: number;
+  bgColor: string;
+  entryPos: { col: number; row: number };  // bottom (entry from realm)
+  exitPos: { col: number; row: number };   // top (must defeat boss to use)
+  sectionStairs: { col: number; row: number }[]; // intra-layer stairs
+  bossPos: { col: number; row: number };   // mandatory boss tile
+  signs: { col: number; row: number; text: string }[];
+  walls: { col: number; row: number }[];   // intra-section divider walls
+}
+
+const layerColors: Record<number, string> = {
+  1: "#1f4f2a", 2: "#3a2a14", 3: "#3a2a14", 4: "#3a1414", 5: "#3a1414",
+  6: "#0c2a3a", 7: "#0c2a3a", 8: "#220a3a", 9: "#3a3007",
+};
+
+const buildLayerMap = (n: number): LayerMapDef => {
+  const cols = 9, rows = 24;
+  const walls: { col: number; row: number }[] = [];
+  // Section dividers at row 8 and row 16 — full row of walls except one gap (stair)
+  for (let c = 1; c < cols - 1; c++) {
+    if (c !== 4) { walls.push({ col: c, row: 8 }); walls.push({ col: c, row: 16 }); }
+  }
+  return {
+    layerId: n, cols, rows,
+    bgColor: layerColors[n] ?? "#1f2937",
+    entryPos: { col: 4, row: 22 },
+    exitPos:  { col: 4, row: 1 },
+    sectionStairs: [{ col: 4, row: 16 }, { col: 4, row: 8 }],
+    bossPos: { col: 4, row: 3 },
+    signs: [
+      { col: 4, row: 21, text: `LAYER ${n}` },
+      { col: 4, row: 15, text: "STAIRS UP →" },
+      { col: 4, row: 7,  text: "BOSS AHEAD" },
+    ],
+    walls,
+  };
+};
+export const LAYER_MAPS: Record<number, LayerMapDef> = Object.fromEntries(
+  [1,2,3,4,5,6,7,8,9].map((n) => [100 + n, buildLayerMap(n)]),
+);
 
 export const PullCost = 10;
 export const TraitPullCost = 25;
-
-// Random encounter probability per grass step.
-export const ENCOUNTER_RATE = 0.05;
+export const ENCOUNTER_RATE = 0.08;

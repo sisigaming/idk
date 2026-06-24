@@ -19,6 +19,8 @@ import {
   QUESTS,
   RarityRates,
   TRAPS_BY_MAP,
+  PUZZLES_BY_MAP,
+  LAYER_MAPS,
   TitleDropRates,
   Titles,
   TraitPullCost,
@@ -69,6 +71,7 @@ export type Scene =
   | "gacha"
   | "dialog"
   | "villager_dialog"
+  | "puzzle"
   | "inventory"
   | "combat"
   | "victory"
@@ -79,8 +82,11 @@ export interface CombatState {
   enemy: Character; enemyMaxHP: number;
   primary: Character;
   attackSlot: Character | null; supportSlot: Character | null;
+  defenseSlot: Character | null;
   log: string[];
-  awaiting: "menu" | "fight" | "act" | "item" | "mercy";
+  bubble: string | null;            // speech bubble for enemy
+  awaiting: "menu" | "react" | "fight" | "act" | "item" | "mercy";
+  reaction: { type: "dodge" | "parry"; rawDmg: number; warning: string } | null;
   currentPhase: number;
   spared: boolean;
   ended: "win" | "lose" | null;
@@ -90,9 +96,12 @@ export interface GameState {
   spaghettiCoins: number;
   inventory: Character[];
   attackSlot: Character | null; supportSlot: Character | null;
+  defenseSlot: Character | null;
   highestLayerCleared: number;
   currentLayer: number;
-  currentMap: number; // 1 = realm, 10..13 = hubs
+  currentMap: number; // 1 = realm, 10..13 = hubs, 100..108 = layer maps L1..L9
+  layerProgress: Record<number, number>;   // layer -> sub-section index reached
+  solvedPuzzles: string[];                  // ids of solved puzzles
   scene: Scene;
   gachaBanner: Role | null;
   dialogNpc: string | null;
@@ -109,9 +118,12 @@ export const createGameState = (): GameState => ({
   spaghettiCoins: 100,
   inventory: [seedAngel()],
   attackSlot: null, supportSlot: null,
+  defenseSlot: null,
   highestLayerCleared: 0,
   currentLayer: 1,
   currentMap: 1,
+  layerProgress: {},
+  solvedPuzzles: [],
   scene: "title",
   gachaBanner: null, dialogNpc: null, villagerId: null,
   combat: null, flash: null,
@@ -271,6 +283,11 @@ export const setSupportSlot = (state: GameState, id: string | null) => {
   const c = state.inventory.find((x) => x.id === id);
   if (c && c.role === "Support") state.supportSlot = c;
 };
+export const setDefenseSlot = (state: GameState, id: string | null) => {
+  if (id === null) { state.defenseSlot = null; return; }
+  const c = state.inventory.find((x) => x.id === id);
+  if (c && c.role === "Defense") state.defenseSlot = c;
+};
 export const setCurrentLayer = (state: GameState, layer: number) => {
   state.currentLayer = Math.max(1, Math.min(9, layer));
 };
@@ -279,7 +296,39 @@ export const setCurrentMap = (state: GameState, mapId: number) => {
   state.scene = "overworld";
 };
 
-// ---------- TRAP STEP ----------
+// ---------- DAMAGE CAP ----------
+export const DAMAGE_CAP = 200;
+const capDmg = (n: number) => Math.min(DAMAGE_CAP, Math.max(0, n));
+
+// ---------- PUZZLE STEP ----------
+export const puzzleAt = (state: GameState, col: number, row: number) => {
+  const puzzles = PUZZLES_BY_MAP[state.currentMap] ?? [];
+  return puzzles.find((p) => p.col === col && p.row === row && !state.solvedPuzzles.includes(p.id));
+};
+export const solvePuzzle = (state: GameState, puzzleId: string, choice: number): { ok: boolean; message: string; reward?: number } => {
+  const all = Object.values(PUZZLES_BY_MAP).flat();
+  const p = all.find((x) => x.id === puzzleId);
+  if (!p) return { ok: false, message: "Puzzle vanished." };
+  if (choice === p.answer) {
+    state.solvedPuzzles.push(puzzleId);
+    state.spaghettiCoins += p.reward;
+    return { ok: true, message: `✓ Correct! +${p.reward} ◆`, reward: p.reward };
+  }
+  // Wrong answer: small HP penalty
+  const primary = getPrimary(state);
+  const pen = 15;
+  primary.currentHP = Math.max(1, primary.currentHP - pen);
+  return { ok: false, message: `✗ Wrong. The path resists you. -${pen} HP.` };
+};
+
+// ---------- LAYER MAP NAV ----------
+export const enterLayerMap = (state: GameState, layer: number) => {
+  state.currentLayer = Math.max(1, Math.min(9, layer));
+  state.currentMap = 100 + state.currentLayer;
+  state.scene = "overworld";
+};
+export const isLayerMap = (mapId: number) => mapId >= 100 && mapId <= 108;
+
 export interface TrapEffect { kind: "spike" | "coin" | "none"; value: number; message?: string }
 export const stepOnTrap = (state: GameState, col: number, row: number): TrapEffect => {
   const traps = TRAPS_BY_MAP[state.currentMap] ?? [];
@@ -318,12 +367,11 @@ export const startCombat = (state: GameState, layerNum: number): boolean => {
     layer: layerNum, enemy, enemyMaxHP: enemy.maxHP, primary,
     attackSlot: state.attackSlot ? { ...state.attackSlot } : null,
     supportSlot: state.supportSlot ? { ...state.supportSlot } : null,
-    log: [
-      `* You descend into Layer ${layer.layer}: ${layer.title}.`,
-      `* The air carries ${enemy.element.toUpperCase()} essence.`,
-      `* ${enemy.name} [${enemy.element}] blocks your path!`,
-    ],
-    awaiting: "menu", currentPhase: -1, spared: false, ended: null,
+    defenseSlot: state.defenseSlot ? { ...state.defenseSlot } : null,
+    log: [`* L${layer.layer}: ${layer.title}.`, `* Element: ${enemy.element.toUpperCase()}.`],
+    bubble: `${enemy.name}: ${enemy.behavior}`,
+    awaiting: "menu", reaction: null,
+    currentPhase: -1, spared: false, ended: null,
   };
   state.scene = "combat";
   return true;
@@ -340,27 +388,40 @@ const corLeonisFactor = (cs: CombatState) => {
   return eq.some((c) => c.title?.code === "absorb_status") ? 0.75 : 1.0;
 };
 
-const enemyAttack = (state: GameState) => {
+// Apply Defense Slot reduction on top of player def.
+const defenseSlotMitigation = (cs: CombatState) => {
+  if (!cs.defenseSlot) return 1.0;
+  // Reduce incoming damage by up to 30% based on defenseSlot's effectiveDef.
+  const factor = Math.min(0.3, effectiveDef(cs.defenseSlot) / 1000);
+  return 1.0 - factor;
+};
+
+const enemyAttack = (state: GameState, reactionResult: "dodge" | "parry" | "miss" | "none" = "none") => {
   const cs = state.combat!;
   const m = elementMultiplier(cs.enemy.element, cs.primary.element);
   const raw = Math.max(1, cs.enemy.attackPower - effectiveDef(cs.primary));
-  let dmg = Math.round(raw * m.mult * corLeonisFactor(cs));
+  let dmg = capDmg(Math.round(raw * m.mult * corLeonisFactor(cs) * defenseSlotMitigation(cs)));
+  // Reaction modifier
+  let reactTag = "";
+  if (reactionResult === "dodge") { dmg = 0; reactTag = " [DODGED!]"; }
+  else if (reactionResult === "parry") { dmg = Math.round(dmg * 0.4); reactTag = " [PARRIED ×0.4]"; }
+  else if (reactionResult === "miss") { reactTag = " [no react]"; }
   if (cs.primary.title?.code === "redistribute_damage") {
-    const targets = [cs.primary, cs.attackSlot, cs.supportSlot].filter(Boolean) as Character[];
+    const targets = [cs.primary, cs.attackSlot, cs.supportSlot, cs.defenseSlot].filter(Boolean) as Character[];
     const each = Math.ceil(dmg / targets.length);
     targets.forEach((t) => (t.currentHP = Math.max(0, t.currentHP - each)));
-    pushLog(cs, `* ${cs.enemy.name} strikes! ${dmg} dmg split ${each} each (Little King).`);
+    pushLog(cs, `* ${cs.enemy.name} strikes! ${dmg} split ${each} each (Little King)${reactTag}.`);
     dmg = 0;
   }
   if (dmg > 0) {
     cs.primary.currentHP = Math.max(0, cs.primary.currentHP - dmg);
     const tag = m.tag === "advantage" ? " [enemy advantage]" : m.tag === "resist" ? " [you resist]" : m.tag === "super" ? " [SUPER]" : "";
-    const cor = corLeonisFactor(cs) < 1 ? " [Cor Leonis -25%]" : "";
-    pushLog(cs, `* ${cs.enemy.name} "${cs.enemy.skillName}" → Angel Sahur takes ${dmg} dmg${tag}${cor}.`);
+    pushLog(cs, `* ${cs.enemy.name} → ${dmg} dmg${tag}${reactTag}.`);
   }
+  cs.bubble = `${cs.enemy.name}: ${rand(["You can't escape.", "I will crush you!", "Try again, halo'd one.", "..."])}`;
   if (cs.primary.currentHP <= 0) {
     cs.ended = "lose";
-    pushLog(cs, `* GAME OVER. Angel Sahur has fallen.`);
+    pushLog(cs, `* GAME OVER.`);
     state.scene = "defeat";
   }
 };
@@ -398,13 +459,32 @@ export const combatFight = (state: GameState, timingMult = 1.0, timingTag = "GOO
   const isBoss = LayersOfHell.find((l) => l.layer === cs.layer)?.isFinal === true;
   const m = elementMultiplier(cs.attackSlot.element, cs.enemy.element, isBoss);
   const raw = Math.max(1, effectiveAtk(cs.attackSlot) - cs.enemy.defensePower);
-  const dmg = Math.round(raw * m.mult * timingMult);
+  const dmg = capDmg(Math.round(raw * m.mult * timingMult));
   cs.enemy.currentHP = Math.max(0, cs.enemy.currentHP - dmg);
   const eTag = m.tag === "super" ? " [LIGHT SUPER ×2.0]" : m.tag === "advantage" ? " [×1.5 element]" : m.tag === "resist" ? " [×0.7 resisted]" : "";
-  pushLog(cs, `* ${timingTag}! ${cs.attackSlot.name} [${cs.attackSlot.element}] uses "${cs.attackSlot.skillName}" → ${dmg} dmg${eTag} (×${timingMult}). HP ${cs.enemy.currentHP}/${cs.enemyMaxHP}.`);
+  pushLog(cs, `* ${timingTag}! ${cs.attackSlot.name} → ${dmg} dmg${eTag} (×${timingMult}). HP ${cs.enemy.currentHP}/${cs.enemyMaxHP}.`);
   if (cs.enemy.currentHP <= 0) { endCombat(state, true); return; }
   checkBossPhase(state);
-  enemyAttack(state);
+  // Queue enemy reaction prompt instead of immediate attack
+  const reactType: "dodge" | "parry" = Math.random() < 0.5 ? "dodge" : "parry";
+  cs.reaction = {
+    type: reactType,
+    rawDmg: cs.enemy.attackPower,
+    warning: reactType === "dodge" ? `${cs.enemy.name} winds up a projectile! DODGE!` : `${cs.enemy.name} swings heavy! PARRY!`,
+  };
+  cs.bubble = `${cs.enemy.name}: ${reactType === "dodge" ? "Dodge this!" : "Block if you can!"}`;
+  cs.awaiting = "react";
+};
+
+// Resolve player's reaction → enemy attack with modifier
+export const resolveReaction = (state: GameState, hit: "success" | "fail") => {
+  const cs = state.combat;
+  if (!cs || !cs.reaction) return;
+  const result: "dodge" | "parry" | "miss" =
+    hit === "success" ? cs.reaction.type : "miss";
+  cs.reaction = null;
+  cs.awaiting = "menu";
+  enemyAttack(state, result);
 };
 
 export const combatItem = (state: GameState) => {

@@ -5,14 +5,14 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import {
-  ElementColor, LayerElement, NpcDialogues, PullCost, TRAPS_BY_MAP,
+  ElementColor, LAYER_MAPS, LayerElement, NpcDialogues, PullCost, PUZZLES_BY_MAP,
   TraitPullCost, findHub, findVillager,
 } from "@/src/game/data";
 import {
   acceptQuest, claimQuest, closeCombat, combatAct, combatFight, combatItem, combatMercy,
-  createGameState, deleteSlot, effectiveMaxHP, Element, evolveCharacter, GameState, inspect,
-  inspectSlot, loadSlot, pullGacha, pullTrait, Rarity, Role,
-  saveSlot, SaveMeta, setAttackSlot, setSupportSlot, startCombat, stepOnTrap, timingMultiplier,
+  createGameState, DAMAGE_CAP, deleteSlot, effectiveMaxHP, Element, enterLayerMap, evolveCharacter, GameState,
+  inspect, inspectSlot, isLayerMap, loadSlot, puzzleAt, pullGacha, pullTrait, Rarity, resolveReaction, Role,
+  saveSlot, SaveMeta, setAttackSlot, setDefenseSlot, setSupportSlot, solvePuzzle, startCombat, timingMultiplier,
 } from "@/src/game/engine";
 import { getState, replaceState, setState, useGameState } from "@/src/game/store";
 
@@ -42,14 +42,17 @@ const REALM_BUILDINGS: Building[] = [
   { kind: "inventory",     col: 5,  row: 12, label: "HOME", roof: "#a16207", body: "#fbbf24", door: { col: 6,  row: 14 } },
 ];
 
-// Physical hub portals — 1-tile stair pads at the south of the realm.
 interface Portal { col: number; row: number; targetMap: number; color: string; label: string }
+// Replace TRAVEL slot (Water) with DESCEND portal? Keep all four element portals plus add a central DESCEND tile that drops player into the current Layer map.
 const REALM_PORTALS: Portal[] = [
   { col: 1,  row: 16, targetMap: 10, color: "#22c55e", label: "▼N" },
   { col: 4,  row: 16, targetMap: 11, color: "#a16207", label: "▼G" },
   { col: 8,  row: 16, targetMap: 12, color: "#ef4444", label: "▼F" },
   { col: 11, row: 16, targetMap: 13, color: "#3b82f6", label: "▼W" },
 ];
+
+// Central layer-descend stair on row 15
+const LAYER_STAIR = { col: 6, row: 15, color: "#dc2626", label: "▼L" };
 
 const buildRealmTiles = () => {
   const m: Record<string, { block: boolean; trigger?: BuildingKind | "portal"; portal?: Portal }> = {};
@@ -138,6 +141,13 @@ export default function Index() {
     // Realm path
     const t = REALM_TILES[`${np.col},${np.row}`];
     if (t?.block) return;
+    // Puzzle check
+    const pz = puzzleAt(s, np.col, np.row);
+    if (pz) {
+      setState((st) => { st.positions[1] = posRef.current; st.scene = "puzzle"; });
+      setPos(np);
+      return;
+    }
     setPos(np);
     const trig = t?.trigger;
     if (trig === "portal" && t?.portal) {
@@ -202,6 +212,7 @@ export default function Index() {
       {state.scene === "gacha" && <GachaScene />}
       {state.scene === "dialog" && <DialogScene />}
       {state.scene === "villager_dialog" && <VillagerDialogScene />}
+      {state.scene === "puzzle" && <PuzzleScene />}
       {state.scene === "inventory" && <InventoryScene />}
       {state.scene === "combat" && <CombatScene />}
       {state.scene === "victory" && <ResultScene win />}
@@ -320,7 +331,9 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
   const cols = hub ? hub.cols : REALM_COLS;
   const rows = hub ? hub.rows : REALM_ROWS;
   const layerEl = LayerElement[state.currentLayer];
-  const traps = TRAPS_BY_MAP[state.currentMap] ?? [];
+  const traps: never[] = []; // traps removed — puzzles take their place
+  const puzzles = PUZZLES_BY_MAP[state.currentMap] ?? [];
+  const unsolvedPuzzles = puzzles.filter((p) => !state.solvedPuzzles.includes(p.id));
 
   return (
     <View style={styles.overworld}>
@@ -358,17 +371,17 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
             }),
           )}
 
-          {/* Traps */}
-          {traps.map((t, i) => (
-            <View key={`tr-${i}`} style={{
-              position: "absolute", left: t.col * TILE + 3, top: t.row * TILE + 3,
-              width: TILE - 6, height: TILE - 6,
-              backgroundColor: t.kind === "spike" ? "#ef4444" : "#f59e0b",
+          {/* Puzzles */}
+          {unsolvedPuzzles.map((p, i) => (
+            <View key={`pz-${i}`} style={{
+              position: "absolute", left: p.col * TILE + 3, top: p.row * TILE + 3,
+              width: TILE - 6, height: TILE - 6, backgroundColor: "#22d3ee",
               borderWidth: 2, borderColor: "#000", alignItems: "center", justifyContent: "center",
             }}>
-              <Text style={{ color: "#000", fontWeight: "900", fontSize: 9, fontFamily: "monospace" }}>{t.kind === "spike" ? "▲" : "$"}</Text>
+              <Text style={{ color: "#000", fontWeight: "900", fontSize: 11, fontFamily: "monospace" }}>?</Text>
             </View>
           ))}
+          {traps.map(() => null)}
 
           {/* Realm portals */}
           {!hub && REALM_PORTALS.map((p, i) => (
@@ -658,8 +671,9 @@ function InventoryScene() {
       <Text style={styles.sceneTitle}>* HOME — INVENTORY</Text>
       {state.flash ? <Text style={styles.flash} testID="inv-flash">{state.flash}</Text> : null}
       <View style={styles.slotsRow}>
-        <View style={styles.slot}><Text style={styles.slotLabel}>ATK SLOT</Text><Text style={styles.slotName} testID="slot-attack">{state.attackSlot ? `${state.attackSlot.name} [${state.attackSlot.element}]` : "—"}</Text></View>
-        <View style={styles.slot}><Text style={styles.slotLabel}>SUP SLOT</Text><Text style={styles.slotName} testID="slot-support">{state.supportSlot ? `${state.supportSlot.name} [${state.supportSlot.element}]` : "—"}</Text></View>
+        <View style={styles.slot}><Text style={styles.slotLabel}>ATK</Text><Text style={styles.slotName} testID="slot-attack">{state.attackSlot ? state.attackSlot.name : "—"}</Text></View>
+        <View style={styles.slot}><Text style={styles.slotLabel}>DEF</Text><Text style={styles.slotName} testID="slot-defense">{state.defenseSlot ? state.defenseSlot.name : "—"}</Text></View>
+        <View style={styles.slot}><Text style={styles.slotLabel}>SUP</Text><Text style={styles.slotName} testID="slot-support">{state.supportSlot ? state.supportSlot.name : "—"}</Text></View>
       </View>
       <ScrollView style={styles.invList} contentContainerStyle={{ padding: 8 }} testID="inv-list">
         {state.inventory.map((c) => (
@@ -680,6 +694,7 @@ function InventoryScene() {
           <View style={styles.invBtnRow}>
             {sel.role === "Attack" && <SqBtn testID="equip-attack" label="EQUIP ATK" onPress={() => setState((s) => { setAttackSlot(s, sel.id); })} />}
             {sel.role === "Support" && <SqBtn testID="equip-support" label="EQUIP SUP" onPress={() => setState((s) => { setSupportSlot(s, sel.id); })} />}
+            {sel.role === "Defense" && <SqBtn testID="equip-defense" label="EQUIP DEF" onPress={() => setState((s) => { setDefenseSlot(s, sel.id); })} />}
             <SqBtn testID="evolve-btn" label="EVOLVE" onPress={() => setState((s) => { const r = evolveCharacter(s, sel.id); s.flash = r.message; })} />
             <SqBtn testID="trait-pull-btn" label={`TRAIT (${TraitPullCost})`} onPress={() => setState((s) => { const r = pullTrait(s, sel.id); s.flash = r.message; })} />
           </View>
@@ -746,6 +761,12 @@ function CombatScene() {
     <View style={styles.combatRoot} testID="combat-screen">
       <View style={styles.enemyZone}>
         <Text style={styles.enemyName}>{cs.enemy.name} · {cs.enemy.element}</Text>
+        {cs.bubble && (
+          <View style={styles.speechBubble} testID="enemy-bubble">
+            <Text style={styles.speechText}>{cs.bubble}</Text>
+            <View style={styles.speechTail} />
+          </View>
+        )}
         <EnemyBlob layer={cs.layer} element={cs.enemy.element} />
         <View style={styles.hpBar}><View style={[styles.hpFill, { width: `${enemyPct * 100}%`, backgroundColor: "#ef4444" }]} /></View>
         <Text style={styles.hpText}>{cs.enemy.currentHP} / {cs.enemyMaxHP}</Text>
@@ -781,11 +802,25 @@ function CombatScene() {
         </View>
       )}
 
+      {cs.reaction && (
+        <View style={styles.reactionPanel} testID="reaction-panel">
+          <Text style={styles.reactionWarn}>⚠ {cs.reaction.warning}</Text>
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+            <Pressable testID="react-success" onPress={() => setState((s) => resolveReaction(s, "success"))} style={({ pressed }) => [styles.reactBtn, { backgroundColor: cs.reaction!.type === "dodge" ? "#22d3ee" : "#facc15" }, pressed && { transform: [{ scale: 0.95 }] }]}>
+              <Text style={[styles.reactBtnText, { color: "#000" }]}>{cs.reaction.type === "dodge" ? "DODGE!" : "PARRY!"}</Text>
+            </Pressable>
+            <Pressable testID="react-fail" onPress={() => setState((s) => resolveReaction(s, "fail"))} style={({ pressed }) => [styles.reactBtn, { borderWidth: 2, borderColor: "#ef4444", backgroundColor: "#000" }, pressed && { transform: [{ scale: 0.95 }] }]}>
+              <Text style={[styles.reactBtnText, { color: "#ef4444" }]}>TAKE HIT</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
       <View style={styles.combatMenu} testID="combat-menu">
-        <CmdBtn testID="cmd-fight"  label="FIGHT" onPress={beginFight} disabled={timing.active} />
-        <CmdBtn testID="cmd-act"    label="ACT"   onPress={() => setState((s) => combatAct(s))} disabled={timing.active} />
-        <CmdBtn testID="cmd-item"   label="ITEM"  onPress={() => setState((s) => combatItem(s))} disabled={timing.active} />
-        <CmdBtn testID="cmd-mercy"  label="MERCY" onPress={() => setState((s) => combatMercy(s))} disabled={timing.active} />
+        <CmdBtn testID="cmd-fight"  label="FIGHT" onPress={beginFight} disabled={timing.active || !!cs.reaction} />
+        <CmdBtn testID="cmd-act"    label="ACT"   onPress={() => setState((s) => combatAct(s))} disabled={timing.active || !!cs.reaction} />
+        <CmdBtn testID="cmd-item"   label="ITEM"  onPress={() => setState((s) => combatItem(s))} disabled={timing.active || !!cs.reaction} />
+        <CmdBtn testID="cmd-mercy"  label="MERCY" onPress={() => setState((s) => combatMercy(s))} disabled={timing.active || !!cs.reaction} />
       </View>
       <View style={styles.slotsRow}>
         <Text style={styles.slotMini}>ATK: {cs.attackSlot ? `${cs.attackSlot.name} [${cs.attackSlot.element}]` : "—"}</Text>
@@ -794,6 +829,38 @@ function CombatScene() {
     </View>
   );
 }
+function PuzzleScene() {
+  const state = useGameState();
+  const p = (() => {
+    const all = Object.values(PUZZLES_BY_MAP).flat();
+    return all.find((x) => !state.solvedPuzzles.includes(x.id)) ?? all[0];
+  })();
+  const [result, setResult] = useState<string | null>(null);
+  if (!p) return null;
+  const choose = (i: number) => {
+    setState((s) => {
+      const r = solvePuzzle(s, p.id, i);
+      setResult(r.message);
+      if (r.ok) setTimeout(() => setState((st) => { st.scene = "overworld"; }), 1200);
+    });
+  };
+  return (
+    <View style={styles.sceneRoot}>
+      <Text style={styles.sceneTitle}>* PUZZLE — {p.kind === "riddle" ? "RIDDLE" : "PATTERN"}</Text>
+      <View style={[styles.panel, { borderColor: "#22d3ee", marginTop: 12 }]} testID="puzzle-panel">
+        <Text style={styles.dialogText}>{p.prompt}</Text>
+        {p.choices.map((c, i) => (
+          <Pressable key={i} testID={`puzzle-choice-${i}`} onPress={() => choose(i)} style={({ pressed }) => [styles.smallBtn, { marginTop: 8 }, pressed && { opacity: 0.7 }]}>
+            <Text style={styles.smallBtnText}>{c}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {result && <Text style={[styles.flash, { color: result.startsWith("✓") ? "#22c55e" : "#ef4444" }]} testID="puzzle-result">{result}</Text>}
+      <SqBtn testID="puzzle-leave" label="LEAVE" tone="ghost" onPress={() => setState((s) => { s.scene = "overworld"; })} />
+    </View>
+  );
+}
+
 function CmdBtn({ label, onPress, testID, disabled }: { label: string; onPress: () => void; testID: string; disabled?: boolean }) {
   return (<Pressable testID={testID} onPress={onPress} disabled={disabled} style={({ pressed }) => [styles.cmdBtn, disabled && { opacity: 0.4 }, pressed && { backgroundColor: "#facc15" }]}><Text style={styles.cmdText}>* {label}</Text></Pressable>);
 }
@@ -958,4 +1025,13 @@ const styles = StyleSheet.create({
   // Result
   bigResult: { fontFamily: "monospace", fontSize: 28, fontWeight: "900", letterSpacing: 3 },
   resultSub: { color: "#fff", fontFamily: "monospace", marginTop: 12 },
+
+  // Speech bubble + reaction
+  speechBubble: { backgroundColor: "#fff", borderWidth: 3, borderColor: "#000", padding: 10, marginBottom: 10, maxWidth: 320, position: "relative" },
+  speechText: { color: "#000", fontFamily: "monospace", fontWeight: "800", fontSize: 12, lineHeight: 18, textAlign: "center" },
+  speechTail: { position: "absolute", bottom: -10, left: "50%", marginLeft: -8, width: 0, height: 0, borderLeftWidth: 8, borderRightWidth: 8, borderTopWidth: 10, borderLeftColor: "transparent", borderRightColor: "transparent", borderTopColor: "#000" },
+  reactionPanel: { marginTop: 8, padding: 10, borderWidth: 3, borderColor: "#ef4444", backgroundColor: "#1f0a0a" },
+  reactionWarn: { color: "#fca5a5", fontFamily: "monospace", fontWeight: "900", fontSize: 12, textAlign: "center", letterSpacing: 1 },
+  reactBtn: { flex: 1, paddingVertical: 12, alignItems: "center", borderWidth: 2, borderColor: "#000" },
+  reactBtnText: { fontFamily: "monospace", fontWeight: "900", fontSize: 14, letterSpacing: 2 },
 });
