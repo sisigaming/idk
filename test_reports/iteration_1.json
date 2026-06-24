@@ -1,0 +1,81 @@
+{
+  "summary": "Frontend-only Expo/React Native testing for Brainrot RPG. Tested NEW features: TUT spawn (PASS), MC Lock for Angel Tung (PASS), Elevation cliff block message (PASS), gate popup testIDs present, REPLAY HELP button present, soul cursor wired. CRITICAL BLOCKER: The TUT Sanctuary (map 14) is unbeatable — player gets stuck on the mid plateau due to missing ramp tiles, which blocks every downstream flow (realm entry, tutorial overlay, layer 1 gate, combat). Recommend hot-fix before re-test. Title→New Game→Slot pick→TUT spawn confirmed. MC lock checks all pass. Elevation block flash works on first wrong climb.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "TUT Sanctuary movement / elevation",
+        "issue": "Player can climb to the MID plateau via ramp (5,8) but CANNOT leave it. To progress north, the path is (5,6 h=1) → (5,5 h=0) — diff=1 needing a ramp at (5,5) or (5,6); neither exists. Also (5,4 h=0) → (5,3 h=2) — diff=2, which heightAllowsStep blocks regardless of ramp because of the abs(h1-h2)>1 short-circuit. Result: puzzle (5,2), exit (5,1) and tutorial completion are unreachable. The entire downstream game (realm, gates, combat) cannot be exercised by a new player.",
+        "testID": "overworld-map",
+        "priority": "CRITICAL"
+      },
+      {
+        "component": "heightAllowsStep / ramp semantics",
+        "issue": "Ramp tiles in RAMPS_BY_MAP are not also entered into HEIGHT_BY_MAP, and heightAllowsStep blocks any move where |h1-h2|>1 BEFORE checking ramps. The ramp's `height` field is unused. This breaks the 2-tier design: stepping from floor (h=0) onto top-plateau (h=2) is never allowed. Reference: /app/frontend/app/index.tsx:34-40 and /app/frontend/src/game/data.ts:498-534.",
+        "testID": "n/a",
+        "priority": "CRITICAL"
+      }
+    ],
+    "integration_issues": [
+      {
+        "flow": "TUT → realm warp → tutorial overlay",
+        "issue": "Could not be tested end-to-end because TUT is unbeatable. completeTutorial / brainrot_tutorial_seen_v1 / TUTORIAL_STEPS overlay flow remains unverified.",
+        "affected_testIDs": ["tutorial-overlay", "tutorial-next", "tutorial-done", "tutorial-skip"]
+      },
+      {
+        "flow": "Layer 1 entry gate popup",
+        "issue": "Could not be reached because player never warps to realm. Code path (canEnterLayer1 + setGatePopup with testID gate-popup / gate-close) is wired correctly in index.tsx:259-275 but needs TUT bug fixed before retest.",
+        "affected_testIDs": ["gate-popup", "gate-close"]
+      },
+      {
+        "flow": "Combat + speech bubble + reaction + damage cap",
+        "issue": "Could not be reached due to TUT block. combat-screen, enemy-bubble, reaction-panel, react-success/fail testIDs exist; capDmg=200 implemented in engine.ts:316-317. Requires retest after TUT fix.",
+        "affected_testIDs": ["combat-screen", "enemy-bubble", "reaction-panel", "react-success", "react-fail", "cmd-fight"]
+      }
+    ],
+    "design_issues": [
+      {
+        "screen": "TUT Sanctuary",
+        "issues": [
+          "Players have no in-game hint that they are stuck — the only feedback is '* The cliff is too steep. Walk to a ramp.' which the player will see infinitely with no recourse.",
+          "Consider also adding sub-ramps within the central column (e.g. ramp tiles at (5,5) and (5,3) so the floor strip rows 4-5 actually bridges the two plateaus)."
+        ]
+      },
+      {
+        "screen": "Inventory",
+        "issues": [
+          "MC lock implementation is clean. Locked note text and ♥ MC badge render correctly; EQUIP/EVOLVE/TRAIT all hidden as required."
+        ]
+      }
+    ],
+    "react_native_issues": [
+      {
+        "component": "Pressable",
+        "issue": "Console warning: 'props.pointerEvents is deprecated. Use style.pointerEvents'. Likely from react-native-safe-area-context / RN web. Non-blocking but worth migrating once. Reference: /app/frontend/app/index.tsx (multiple Pressable / View usages)."
+      }
+    ]
+  },
+  "test_report_links": ["/app/test_reports/iteration_1.json"],
+  "action_items": [
+    "FIX (CRITICAL): TUT Sanctuary (map id=14) cannot be completed because of missing ramps between mid and top plateaus. Two options:",
+    "  Option A (data fix): Add ramp tiles at (5,5) and (5,3) in RAMPS_BY_MAP[14] AND give them a height entry so they sit between floor and plateau. Specifically: add HEIGHT_BY_MAP[14] entries {(5,5): h=1} and {(5,3): h=2} (so each ramp bridges exactly 1 tier).",
+    "  Option B (logic fix): Update heightAllowsStep so that when stepping onto/off a ramp, the ramp's declared `height` overrides getHeight. Pseudo: if isRamp(to), treat h2 := rampHeight - 1 (climbing); if isRamp(from), treat h1 := rampHeight - 1. This decouples data from code.",
+    "After TUT fix, re-run the full priority flow (TUT → realm → tutorial overlay → MC lock retest → gate popup → combat reaction).",
+    "Verify Combat damage cap by reading combat-log lines: assert no `→ Ndmg` where N > 200.",
+    "Verify soul cursor prefix: cmd-fight default starts with '♥ ' (PASS in current screenshot — see CONSOLE log).",
+    "Optional: replace deprecated `props.pointerEvents` usages with `style.pointerEvents` to clear the console warning."
+  ],
+  "critical_code_review_comments": [
+    "/app/frontend/app/index.tsx is 1389 lines — consider splitting scenes (TitleScene, InventoryScene, CombatScene, PuzzleScene, TutorialOverlay) into separate files for maintainability.",
+    "engine.ts:387 — stepOnTrap message still says 'Angel Sahur takes ... dmg' but the MC has been renamed to 'Angel Tung'. Cosmetic but should be updated for consistency.",
+    "TUTORIAL_STEPS body in index.tsx:1160 says 'You play Angel Sahur.' — should be 'Angel Tung' to match the renamed MC.",
+    "heightAllowsStep does not respect a ramp's declared `height`, which is the root cause of the TUT block. The data and logic are out of sync."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "n/a (frontend-only run)", "frontend": "Approx 40% — features that could be validated PASS; ~60% of the new-feature surface area is gated behind the TUT block." },
+  "seed_data_creation": "None (offline game, used in-game New Game → Slot 1).",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Once TUT ramps/heights are fixed, run the same Playwright flow used here. Specifically validate: (1) walk path (5,12)→(5,1) via ramps reaches puzzle at (5,2); (2) answering puzzle choice 1 ('A gacha banner') solves and grants +50 coins; (3) stepping on (5,1) triggers completeTutorial → realm map id=1 at PLAYER_DEFAULT_REALM, and tutorial-overlay appears once; (4) on realm, no ATK equipped + step on (6,15) shows gate-popup with title 'THE STAIR REJECTS YOU' and a working gate-close; (5) equipping any ATK then stepping on stair enters layer map 101; (6) combat shows enemy-bubble + after FIGHT shows reaction-panel; (7) every damage line in combat-log has number ≤ 200.",
+  "rca_of_issue": "Root cause: heightAllowsStep(from, to) in /app/frontend/app/index.tsx:34-40 reads both tiles' heights from HEIGHT_BY_MAP, then enforces abs(h1-h2)<=1 BEFORE consulting RAMPS_BY_MAP. Ramp tiles in TUT (cols 5 row 8 and 5 row 4) are not present in HEIGHT_BY_MAP[14], so their getHeight() returns 0. Consequence: (a) ramp at (5,4) cannot bridge floor→top-plateau (height diff 2); (b) mid-plateau (rows 6-7, h=1) has no descending ramp at its northern edge, trapping the player. Reproduction: start a new game; from default spawn (5,12) walk up via (5,8) ramp; once on mid plateau press ↑ — flash 'The cliff is too steep.' permanently. Mitigation: see action_items 'Option A' (data fix) or 'Option B' (engine fix)."
+}

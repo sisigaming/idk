@@ -5,13 +5,13 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import {
-  ElementColor, LAYER_MAPS, LayerElement, NpcDialogues, PullCost, PUZZLES_BY_MAP,
-  TraitPullCost, findHub, findVillager,
+  ElementColor, HEIGHT_BY_MAP, LAYER_MAPS, LayerElement, NpcDialogues, PullCost, PUZZLES_BY_MAP,
+  RAMPS_BY_MAP, TraitPullCost, findHub, findVillager,
 } from "@/src/game/data";
 import {
-  acceptQuest, claimQuest, closeCombat, combatAct, combatFight, combatItem, combatMercy,
-  createGameState, deleteSlot, effectiveMaxHP, Element, enterLayerMap, evolveCharacter, GameState,
-  inspect, inspectSlot, isLayerMap, loadSlot, puzzleAt, pullGacha, pullTrait, Rarity, resolveReaction, Role,
+  acceptQuest, canCrossTierGate, canEnterLayer1, claimQuest, closeCombat, combatAct, combatFight, combatItem, combatMercy,
+  completeTutorial, createGameState, deleteSlot, effectiveMaxHP, Element, enterLayerMap, evolveCharacter, GameState,
+  inspect, inspectSlot, isLayerMap, isPrimary, loadSlot, puzzleAt, pullGacha, pullTrait, Rarity, resolveReaction, Role,
   saveSlot, SaveMeta, setAttackSlot, setDefenseSlot, setSupportSlot, solvePuzzle, startCombat, timingMultiplier,
 } from "@/src/game/engine";
 import { getState, replaceState, setState, useGameState } from "@/src/game/store";
@@ -20,6 +20,24 @@ import { storage } from "@/src/utils/storage";
 // ============================================================
 const TILE = 22;
 type Dir = "up" | "down" | "left" | "right";
+
+// ----- HEIGHT HELPERS -----
+const getHeight = (mapId: number, col: number, row: number): number => {
+  const arr = HEIGHT_BY_MAP[mapId] ?? [];
+  const h = arr.find((t) => t.col === col && t.row === row);
+  return h?.height ?? 0;
+};
+const isRamp = (mapId: number, col: number, row: number): boolean => {
+  const arr = RAMPS_BY_MAP[mapId] ?? [];
+  return arr.some((r) => r.col === col && r.row === row);
+};
+const heightAllowsStep = (mapId: number, fromC: number, fromR: number, toC: number, toR: number): boolean => {
+  const h1 = getHeight(mapId, fromC, fromR);
+  const h2 = getHeight(mapId, toC, toR);
+  if (h1 === h2) return true;
+  if (Math.abs(h1 - h2) > 1) return false;
+  return isRamp(mapId, fromC, fromR) || isRamp(mapId, toC, toR);
+};
 
 // ----- REALM MAP -----
 const REALM_COLS = 13;
@@ -81,6 +99,7 @@ export default function Index() {
   posRef.current = pos;
   const [trapFlash, setTrapFlash] = useState<string | null>(null);
   const [showTutorial, setShowTutorial] = useState(false);
+  const [gatePopup, setGatePopup] = useState<{ title: string; body: string } | null>(null);
 
   // Show tutorial on first overworld visit if not seen before
   useEffect(() => {
@@ -132,6 +151,11 @@ export default function Index() {
       if (np.col === 0 || np.row === 0 || np.col === C - 1 || np.row === R - 1) return;
       // Wall collision (intra-layer dividers)
       if (layerMap.walls.some((w) => w.col === np.col && w.row === np.row)) return;
+      // Elevation: block cliff steps without ramps
+      if (!heightAllowsStep(s.currentMap, posRef.current.col, posRef.current.row, np.col, np.row)) {
+        flashMsg("* The cliff is too steep. Find a ramp.");
+        return;
+      }
       // Step on boss tile -> mandatory boss fight
       if (np.col === layerMap.bossPos.col && np.row === layerMap.bossPos.row) {
         if (!s.attackSlot || !s.supportSlot) {
@@ -173,6 +197,11 @@ export default function Index() {
     // ---------- HUB MOVEMENT ----------
     if (hub) {
       if (np.col === 0 || np.row === 0 || np.col === C - 1 || np.row === R - 1) return;
+      // Elevation rule for hubs that have terraced terrain (TUT)
+      if (!heightAllowsStep(s.currentMap, posRef.current.col, posRef.current.row, np.col, np.row)) {
+        flashMsg("* The cliff is too steep. Walk to a ramp.");
+        return;
+      }
       const v = hub.villagers.find((x) => x.col === np.col && x.row === np.row);
       if (v) {
         setState((st) => {
@@ -182,6 +211,15 @@ export default function Index() {
         return;
       }
       if (np.col === hub.exit.col && np.row === hub.exit.row) {
+        // TUT zone: completing it warps to realm map; other hubs return via portal
+        if (hub.id === 14) {
+          setState((st) => {
+            st.positions[st.currentMap] = np;
+            completeTutorial(st);
+            st.positions[1] = { col: PLAYER_DEFAULT_REALM.col, row: PLAYER_DEFAULT_REALM.row };
+          });
+          return;
+        }
         setState((st) => {
           st.positions[st.currentMap] = np;
           const portal = REALM_PORTALS.find((p) => p.targetMap === st.currentMap);
@@ -219,10 +257,17 @@ export default function Index() {
       return;
     }
     if (trig === "layer_stair") {
+      // Layer 1 entry gate — must have ATK equipped OR SUP with Cor Leonis
+      if (s.currentLayer === 1) {
+        const r1 = canEnterLayer1(s);
+        if (!r1.ok) { setGatePopup({ title: "✗ THE STAIR REJECTS YOU", body: r1.reason ?? "" }); return; }
+      }
+      // Tier gates at L3->L4 and L6->L7
+      const r2 = canCrossTierGate(s, s.currentLayer);
+      if (!r2.ok) { setGatePopup({ title: "✗ ROYAL AUTHORITY REQUIRED", body: r2.reason ?? "" }); return; }
       setState((st) => {
         st.positions[1] = np;
         enterLayerMap(st, st.currentLayer);
-        // place player at the layer map entry tile
         const lm = LAYER_MAPS[st.currentMap];
         if (lm) st.positions[st.currentMap] = lm.entryPos;
       });
@@ -275,6 +320,18 @@ export default function Index() {
       {state.scene === "defeat" && <ResultScene win={false} />}
       {showTutorial && state.scene === "overworld" && state.currentMap === 1 && (
         <TutorialOverlay onClose={dismissTutorial} />
+      )}
+      {gatePopup && (
+        <View style={styles.gateBackdrop} testID="gate-popup">
+          <View style={styles.gatePanel}>
+            <Text style={styles.gateTitle}>{gatePopup.title}</Text>
+            <View style={styles.gateDivider} />
+            <Text style={styles.gateBody}>{gatePopup.body}</Text>
+            <Pressable testID="gate-close" onPress={() => setGatePopup(null)} style={({ pressed }) => [styles.gateBtn, pressed && { backgroundColor: "#fde047" }]}>
+              <Text style={styles.gateBtnText}>* UNDERSTOOD</Text>
+            </Pressable>
+          </View>
+        </View>
       )}
     </SafeAreaView>
   );
@@ -437,6 +494,34 @@ function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash }: {
             }),
           )}
 
+          {/* Elevation tiles — chunky raised faces give the world a 2.5D look */}
+          {(HEIGHT_BY_MAP[state.currentMap] ?? []).map((h, i) => (
+            <View key={`h-${i}`} pointerEvents="none">
+              {/* Top face of cliff */}
+              <View style={{
+                position: "absolute", left: h.col * TILE, top: h.row * TILE - h.height * 3,
+                width: TILE, height: TILE, backgroundColor: shade(bgColor, 12 * h.height),
+                borderTopWidth: 1, borderLeftWidth: 1, borderRightWidth: 1, borderColor: "#000",
+              }} />
+              {/* Dropped shadow face below cliff */}
+              <View style={{
+                position: "absolute", left: h.col * TILE, top: h.row * TILE + TILE - h.height * 3,
+                width: TILE, height: h.height * 3, backgroundColor: shade(bgColor, -40),
+                borderLeftWidth: 1, borderRightWidth: 1, borderBottomWidth: 1, borderColor: "#000",
+              }} />
+            </View>
+          ))}
+          {/* Ramps — diagonal-striped yellow tiles */}
+          {(RAMPS_BY_MAP[state.currentMap] ?? []).map((rmp, i) => (
+            <View key={`rmp-${i}`} pointerEvents="none" style={{
+              position: "absolute", left: rmp.col * TILE, top: rmp.row * TILE - rmp.height * 3 + 1,
+              width: TILE, height: TILE - 2, backgroundColor: "#fbbf24",
+              borderWidth: 2, borderColor: "#a16207", alignItems: "center", justifyContent: "center",
+            }}>
+              <Text style={{ color: "#7c2d12", fontFamily: "monospace", fontWeight: "900", fontSize: 11 }}>{rmp.dir === "up" ? "▲" : "▼"}</Text>
+            </View>
+          ))}
+
           {/* Layer map walls (intra-section dividers) */}
           {layerMap && layerMap.walls.map((w, i) => (
             <View key={`lw-${i}`} style={{
@@ -552,10 +637,22 @@ function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash }: {
             </View>
           )}
 
-          {/* Player */}
-          <View style={[styles.player, { left: pos.col * TILE + 2, top: pos.row * TILE + 2 }]} testID="player-avatar">
-            <AngelSprite facing={facing} />
-          </View>
+          {/* Player — Y-offset by elevation, with drop shadow for 2.5D feel */}
+          {(() => {
+            const ph = getHeight(state.currentMap, pos.col, pos.row);
+            const liftY = ph * 3;
+            return (
+              <>
+                <View pointerEvents="none" style={{
+                  position: "absolute", left: pos.col * TILE + 4, top: pos.row * TILE + TILE - 4,
+                  width: TILE - 8, height: 4, borderRadius: 4, backgroundColor: "#000", opacity: 0.45,
+                }} />
+                <View style={[styles.player, { left: pos.col * TILE + 2, top: pos.row * TILE + 2 - liftY }]} testID="player-avatar">
+                  <AngelSprite facing={facing} />
+                </View>
+              </>
+            );
+          })()}
         </View>
       </ScrollView>
 
@@ -799,34 +896,44 @@ function InventoryScene() {
         <View style={styles.slot}><Text style={styles.slotLabel}>SUP</Text><Text style={styles.slotName} testID="slot-support">{state.supportSlot ? state.supportSlot.name : "—"}</Text></View>
       </View>
       <ScrollView style={styles.invList} contentContainerStyle={{ padding: 8 }} testID="inv-list">
-        {state.inventory.map((c) => (
-          <Pressable key={c.id} onPress={() => setSelected(c.id)} testID={`inv-item-${c.id}`} style={[styles.invRow, selected === c.id && { borderColor: "#facc15" }]}>
-            <View style={[styles.rarityDot, { backgroundColor: rarityColor(c.rarity) }]} />
-            <View style={[styles.rarityDot, { backgroundColor: ElementColor[c.element] }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.invName}>{c.name}</Text>
-              <Text style={styles.invMeta}>{inspect(c)}</Text>
-              {selected === c.id ? (<><Text style={styles.invLore}>{`Design: ${c.design}`}</Text><Text style={styles.invLore}>{`Behavior: ${c.behavior}`}</Text></>) : null}
-            </View>
-          </Pressable>
-        ))}
+        {state.inventory.map((c) => {
+          const locked = isPrimary(c);
+          return (
+            <Pressable key={c.id} onPress={() => setSelected(c.id)} testID={`inv-item-${c.id}`} style={[styles.invRow, selected === c.id && { borderColor: "#facc15" }]}>
+              <View style={[styles.rarityDot, { backgroundColor: rarityColor(c.rarity) }]} />
+              <View style={[styles.rarityDot, { backgroundColor: ElementColor[c.element] }]} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.invName}>{c.name}{locked ? "  ♥ MC" : ""}</Text>
+                <Text style={styles.invMeta}>{inspect(c)}</Text>
+                {selected === c.id ? (<><Text style={styles.invLore}>{`Design: ${c.design}`}</Text><Text style={styles.invLore}>{`Behavior: ${c.behavior}`}</Text></>) : null}
+              </View>
+            </Pressable>
+          );
+        })}
       </ScrollView>
       {sel && (
         <View style={styles.invActions}>
-          <Text style={styles.selName}>SELECTED: {sel.name}</Text>
+          <Text style={styles.selName}>SELECTED: {sel.name}{isPrimary(sel) ? " · ♥ LOCKED MC" : ""}</Text>
           <View style={styles.invBtnRow}>
-            {sel.role === "Attack" && <SqBtn testID="equip-attack" label="EQUIP ATK" onPress={() => setState((s) => { setAttackSlot(s, sel.id); })} />}
-            {sel.role === "Support" && <SqBtn testID="equip-support" label="EQUIP SUP" onPress={() => setState((s) => { setSupportSlot(s, sel.id); })} />}
-            {sel.role === "Defense" && <SqBtn testID="equip-defense" label="EQUIP DEF" onPress={() => setState((s) => { setDefenseSlot(s, sel.id); })} />}
-            <SqBtn testID="evolve-btn" label="EVOLVE" onPress={() => setState((s) => { const r = evolveCharacter(s, sel.id); s.flash = r.message; })} />
-            <SqBtn testID="trait-pull-btn" label={`TRAIT (${TraitPullCost})`} onPress={() => setState((s) => { const r = pullTrait(s, sel.id); s.flash = r.message; })} />
+            {isPrimary(sel) ? (
+              <Text style={styles.lockedNote}>* Angel Tung is your Main Character. He cannot be unequipped or evolved.</Text>
+            ) : (
+              <>
+                {sel.role === "Attack" && <SqBtn testID="equip-attack" label="EQUIP ATK" onPress={() => setState((s) => { setAttackSlot(s, sel.id); })} />}
+                {sel.role === "Support" && <SqBtn testID="equip-support" label="EQUIP SUP" onPress={() => setState((s) => { setSupportSlot(s, sel.id); })} />}
+                {sel.role === "Defense" && <SqBtn testID="equip-defense" label="EQUIP DEF" onPress={() => setState((s) => { setDefenseSlot(s, sel.id); })} />}
+                <SqBtn testID="evolve-btn" label="EVOLVE" onPress={() => setState((s) => { const r = evolveCharacter(s, sel.id); s.flash = r.message; })} />
+                <SqBtn testID="trait-pull-btn" label={`TRAIT (${TraitPullCost})`} onPress={() => setState((s) => { const r = pullTrait(s, sel.id); s.flash = r.message; })} />
+              </>
+            )}
           </View>
         </View>
       )}
       <View style={styles.invFooter}>
         <Text style={styles.smallNote}>Quests active: {state.quests.filter((q) => q.isAccepted && !q.isClaimed).length}</Text>
-        <View style={{ flexDirection: "row", gap: 6 }}>
+        <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
           <SqBtn testID="inv-save" label={state.activeSlot ? `SAVE → S${state.activeSlot}` : "NO SLOT"} onPress={doSave} />
+          <SqBtn testID="inv-replay-tut" label="REPLAY HELP" tone="ghost" onPress={async () => { await storage.removeItem("brainrot_tutorial_seen_v1"); setState((s) => { s.flash = "Hint will reappear on the realm screen."; }); }} />
           <SqBtn testID="inv-title" label="TITLE" tone="ghost" onPress={() => setState((s) => { s.scene = "title"; s.activeSlot = null; })} />
           <SqBtn testID="inv-exit" label="LEAVE" tone="ghost" onPress={() => setState((s) => { s.scene = "overworld"; })} />
         </View>
@@ -845,6 +952,19 @@ function CombatScene() {
   const [timing, setTiming] = useState<{ active: boolean; pos: number; dir: 1 | -1 }>({ active: false, pos: 0, dir: 1 });
   const timingRef = useRef(timing);
   timingRef.current = timing;
+  const [soul, setSoul] = useState(0); // Undertale-style ♥ cursor index (0..3)
+
+  // Keyboard left/right to move soul cursor; Enter to select
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const onKey = (e: KeyboardEvent) => {
+      if (state.scene !== "combat") return;
+      if (e.key === "ArrowLeft" || e.key === "a") setSoul((p) => (p + 3) % 4);
+      else if (e.key === "ArrowRight" || e.key === "d") setSoul((p) => (p + 1) % 4);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [state.scene]);
 
   // Animate timing bar
   useEffect(() => {
@@ -898,7 +1018,7 @@ function CombatScene() {
         {cs.log.map((l, i) => <Text key={i} style={styles.combatLine}>{l}</Text>)}
       </ScrollView>
       <View style={styles.heroBar}>
-        <Text style={styles.heroLabel}>HP · ANGEL SAHUR · LIGHT</Text>
+        <Text style={styles.heroLabel}>HP · {cs.primary.name.toUpperCase()} · {cs.primary.element.toUpperCase()}</Text>
         <View style={styles.hpBar}><View style={[styles.hpFill, { width: `${heroPct * 100}%`, backgroundColor: "#facc15" }]} /></View>
         <Text style={styles.hpText}>{cs.primary.currentHP} / {heroMax}</Text>
       </View>
@@ -940,10 +1060,25 @@ function CombatScene() {
       )}
 
       <View style={styles.combatMenu} testID="combat-menu">
-        <CmdBtn testID="cmd-fight"  label="FIGHT" onPress={beginFight} disabled={timing.active || !!cs.reaction} />
-        <CmdBtn testID="cmd-act"    label="ACT"   onPress={() => setState((s) => combatAct(s))} disabled={timing.active || !!cs.reaction} />
-        <CmdBtn testID="cmd-item"   label="ITEM"  onPress={() => setState((s) => combatItem(s))} disabled={timing.active || !!cs.reaction} />
-        <CmdBtn testID="cmd-mercy"  label="MERCY" onPress={() => setState((s) => combatMercy(s))} disabled={timing.active || !!cs.reaction} />
+        {[
+          { id: "cmd-fight", label: "FIGHT", onPress: beginFight },
+          { id: "cmd-act",   label: "ACT",   onPress: () => setState((s) => combatAct(s)) },
+          { id: "cmd-item",  label: "ITEM",  onPress: () => setState((s) => combatItem(s)) },
+          { id: "cmd-mercy", label: "MERCY", onPress: () => setState((s) => combatMercy(s)) },
+        ].map((b, i) => (
+          <Pressable
+            key={b.id}
+            testID={b.id}
+            disabled={timing.active || !!cs.reaction}
+            onFocus={() => setSoul(i)}
+            onHoverIn={() => setSoul(i)}
+            onPressIn={() => setSoul(i)}
+            onPress={b.onPress}
+            style={({ pressed }) => [styles.cmdBtn, (timing.active || !!cs.reaction) && { opacity: 0.4 }, pressed && { backgroundColor: "#facc15" }]}
+          >
+            <Text style={[styles.cmdText, soul === i && { color: "#fff" }]}>{soul === i ? "♥ " : "* "}{b.label}</Text>
+          </Pressable>
+        ))}
       </View>
       <View style={styles.slotsRow}>
         <Text style={styles.slotMini}>ATK: {cs.attackSlot ? `${cs.attackSlot.name} [${cs.attackSlot.element}]` : "—"}</Text>
@@ -984,9 +1119,6 @@ function PuzzleScene() {
   );
 }
 
-function CmdBtn({ label, onPress, testID, disabled }: { label: string; onPress: () => void; testID: string; disabled?: boolean }) {
-  return (<Pressable testID={testID} onPress={onPress} disabled={disabled} style={({ pressed }) => [styles.cmdBtn, disabled && { opacity: 0.4 }, pressed && { backgroundColor: "#facc15" }]}><Text style={styles.cmdText}>* {label}</Text></Pressable>);
-}
 function EnemyBlob({ layer, element }: { layer: number; element: Element }) {
   const sz = 60 + layer * 4;
   const color = ElementColor[element];
@@ -1228,4 +1360,30 @@ const styles = StyleSheet.create({
   reactionWarn: { color: "#fca5a5", fontFamily: "monospace", fontWeight: "900", fontSize: 12, textAlign: "center", letterSpacing: 1 },
   reactBtn: { flex: 1, paddingVertical: 12, alignItems: "center", borderWidth: 2, borderColor: "#000" },
   reactBtnText: { fontFamily: "monospace", fontWeight: "900", fontSize: 14, letterSpacing: 2 },
+
+  // Tutorial overlay
+  tutorialBackdrop: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.85)", alignItems: "center", justifyContent: "center", padding: 16 },
+  tutorialPanel: { width: "100%", maxWidth: 460, borderWidth: 4, borderColor: "#facc15", backgroundColor: "#0b0d14", padding: 18 },
+  tutorialStepNum: { color: "#94a3b8", fontFamily: "monospace", fontSize: 10, letterSpacing: 2 },
+  tutorialTitle: { color: "#facc15", fontFamily: "monospace", fontWeight: "900", fontSize: 18, letterSpacing: 2, marginTop: 6 },
+  tutorialDivider: { height: 2, backgroundColor: "#facc15", marginVertical: 10 },
+  tutorialBody: { color: "#fff", fontFamily: "monospace", fontSize: 13, lineHeight: 20 },
+  tutorialHint: { color: "#a3e635", fontFamily: "monospace", fontSize: 11, marginTop: 12 },
+  tutorialBtnRow: { flexDirection: "row", gap: 8, marginTop: 14, justifyContent: "flex-end" },
+  tutorialBtn: { paddingHorizontal: 16, paddingVertical: 10, borderWidth: 3, borderColor: "#000", backgroundColor: "#facc15" },
+  tutorialBtnText: { color: "#000", fontFamily: "monospace", fontWeight: "900", fontSize: 12, letterSpacing: 2 },
+  tutorialBtnGhost: { paddingHorizontal: 12, paddingVertical: 10, borderWidth: 2, borderColor: "#475569", backgroundColor: "#000" },
+  tutorialBtnGhostText: { color: "#94a3b8", fontFamily: "monospace", fontWeight: "900", fontSize: 11, letterSpacing: 1 },
+
+  // Gate popup (Layer 1 + tier-gate)
+  gateBackdrop: { position: "absolute", left: 0, right: 0, top: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.92)", alignItems: "center", justifyContent: "center", padding: 16 },
+  gatePanel: { width: "100%", maxWidth: 440, borderWidth: 4, borderColor: "#ef4444", backgroundColor: "#1a0a0a", padding: 18 },
+  gateTitle: { color: "#fca5a5", fontFamily: "monospace", fontWeight: "900", fontSize: 16, letterSpacing: 2, textAlign: "center" },
+  gateDivider: { height: 2, backgroundColor: "#ef4444", marginVertical: 10 },
+  gateBody: { color: "#fff", fontFamily: "monospace", fontSize: 13, lineHeight: 20, textAlign: "left" },
+  gateBtn: { marginTop: 16, paddingVertical: 12, borderWidth: 3, borderColor: "#000", backgroundColor: "#facc15", alignItems: "center" },
+  gateBtnText: { color: "#000", fontFamily: "monospace", fontWeight: "900", fontSize: 13, letterSpacing: 2 },
+
+  // MC locked note
+  lockedNote: { color: "#a3e635", fontFamily: "monospace", fontSize: 11, padding: 6 },
 });

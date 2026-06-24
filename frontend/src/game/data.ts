@@ -301,6 +301,29 @@ export interface VillagerDef {
 
 export const HUB_MAPS: HubMapDef[] = [
   {
+    id: 14, name: "Tut Sanctuary", element: "Light",
+    bgColor: "#1a2433", accent: "#facc15", cols: 11, rows: 14, exit: { col: 5, row: 1 },
+    villagers: [
+      { id: "tut-1", name: "Coach Sage",  col: 2, row: 9, color: "#a3e635", lines: [
+        "* Welcome, halo'd one.",
+        "* Use the D-PAD (or arrow keys / WASD on web) to walk.",
+        "* The dark blocks ahead are RAISED tiles — climb the yellow RAMPS to ascend.",
+        "* Try it: walk up the center of the room.",
+      ]},
+      { id: "tut-2", name: "Puzzle Sage", col: 8, row: 5, color: "#22d3ee", lines: [
+        "* Higher ground hides riddles.",
+        "* Step on the cyan ? tile north of me to face a question.",
+        "* Solve it, then climb to the ▲UP gate to leave the Sanctuary.",
+      ]},
+      { id: "tut-3", name: "Combat Sage", col: 5, row: 4, color: "#facc15", lines: [
+        "* Hell awaits beyond the Sanctuary.",
+        "* Equip an ATK Brainrot from MENU → INVENTORY before approaching the red ▼L stair.",
+        "* Damage caps at 200 per hit. Stop the timing bar in the center for PERFECT damage.",
+        "* When enemies wind up, DODGE or PARRY their reactions.",
+      ]},
+    ],
+  },
+  {
     id: 10, name: "Villaggio di Spaghetti", element: "Nature",
     bgColor: "#1f4f2a", accent: "#22c55e", cols: 11, rows: 13, exit: { col: 5, row: 12 },
     villagers: [
@@ -385,6 +408,13 @@ export interface PuzzleDef {
   reward: number;
 }
 export const PUZZLES_BY_MAP: Record<number, PuzzleDef[]> = {
+  // TUT Sanctuary — single warmup puzzle blocking the ▲UP gate
+  14: [
+    { id: "tut-p1", col: 5, row: 2, kind: "riddle",
+      prompt: "What grows stronger the more you pull?",
+      choices: ["A muscle", "A gacha banner", "A halo", "A bat-drum"],
+      answer: 1, reward: 50 },
+  ],
   // Layer 1 walkable map (id 101)
   101: [
     { id: "p1-1", col: 4, row: 4,  kind: "riddle", prompt: "What grows louder the more you ignore it?",
@@ -458,3 +488,62 @@ export const LAYER_MAPS: Record<number, LayerMapDef> = Object.fromEntries(
 export const PullCost = 10;
 export const TraitPullCost = 25;
 export const ENCOUNTER_RATE = 0.08;
+
+// ---------- ELEVATION (2.5D HEIGHT TIERS) ----------
+// height: 0 (floor) .. 3 (top cliff). Ramps are climbable transitions.
+export interface HeightDef { col: number; row: number; height: number }
+export interface RampDef { col: number; row: number; height: number; dir: "up" | "down" }
+
+// TUT Sanctuary: a small terraced room. Two cliff tiers separated by ramps.
+export const HEIGHT_BY_MAP: Record<number, HeightDef[]> = {
+  14: [
+    // Mid plateau (height 1) — central platform
+    ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 7, height: 1 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 6, height: 1 })),
+    // Top plateau (height 2) — where the puzzle + exit sit
+    ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 3, height: 2 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 2, height: 2 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 1, height: 2 })),
+  ],
+  // Layer maps get gentle elevation: each sub-section is one tier higher than the last.
+  101: buildLayerHeight(),
+  102: buildLayerHeight(),
+  103: buildLayerHeight(),
+  104: buildLayerHeight(),
+  105: buildLayerHeight(),
+  106: buildLayerHeight(),
+  107: buildLayerHeight(),
+  108: buildLayerHeight(),
+  109: buildLayerHeight(),
+};
+
+export const RAMPS_BY_MAP: Record<number, RampDef[]> = {
+  14: [
+    { col: 5, row: 8, height: 1, dir: "up" },   // ramp to mid plateau
+    { col: 5, row: 4, height: 2, dir: "up" },   // ramp to top plateau
+  ],
+  101: layerRamps(),
+  102: layerRamps(),
+  103: layerRamps(),
+  104: layerRamps(),
+  105: layerRamps(),
+  106: layerRamps(),
+  107: layerRamps(),
+  108: layerRamps(),
+  109: layerRamps(),
+};
+
+function buildLayerHeight(): HeightDef[] {
+  const out: HeightDef[] = [];
+  // mid section (rows 9..15) tier 1
+  for (let r = 9; r <= 15; r++) for (let c = 1; c < 8; c++) out.push({ col: c, row: r, height: 1 });
+  // top section (rows 1..7) tier 2
+  for (let r = 1; r <= 7; r++) for (let c = 1; c < 8; c++) out.push({ col: c, row: r, height: 2 });
+  return out;
+}
+function layerRamps(): RampDef[] {
+  return [
+    { col: 4, row: 16, height: 1, dir: "up" },
+    { col: 4, row: 8,  height: 2, dir: "up" },
+  ];
+}

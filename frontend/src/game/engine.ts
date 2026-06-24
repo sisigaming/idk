@@ -8,7 +8,6 @@
 // ============================================================
 
 import {
-  ALL_ATTACK,
   ENCOUNTER_RATE,
   EvolveCost,
   EvolveOrder,
@@ -20,7 +19,6 @@ import {
   RarityRates,
   TRAPS_BY_MAP,
   PUZZLES_BY_MAP,
-  LAYER_MAPS,
   TitleDropRates,
   Titles,
   TraitPullCost,
@@ -99,7 +97,7 @@ export interface GameState {
   defenseSlot: Character | null;
   highestLayerCleared: number;
   currentLayer: number;
-  currentMap: number; // 1 = realm, 10..13 = hubs, 100..108 = layer maps L1..L9
+  currentMap: number; // 1 = realm, 5 = TUT zone, 10..13 = hubs, 100..108 = layer maps L1..L9
   layerProgress: Record<number, number>;   // layer -> sub-section index reached
   solvedPuzzles: string[];                  // ids of solved puzzles
   scene: Scene;
@@ -112,6 +110,7 @@ export interface GameState {
   // Saved positions: per-map last-known position
   positions: Record<number, { col: number; row: number }>;
   activeSlot: 1 | 2 | 3 | null;
+  tutCompleted: boolean;
 }
 
 export const createGameState = (): GameState => ({
@@ -121,7 +120,7 @@ export const createGameState = (): GameState => ({
   defenseSlot: null,
   highestLayerCleared: 0,
   currentLayer: 1,
-  currentMap: 1,
+  currentMap: 14,           // start in TUT zone (hub id 14) for new games
   layerProgress: {},
   solvedPuzzles: [],
   scene: "title",
@@ -130,12 +129,29 @@ export const createGameState = (): GameState => ({
   quests: QUESTS.map((q) => ({ ...q })),
   positions: {},
   activeSlot: null,
+  tutCompleted: false,
 });
 
 const seedAngel = (): Character => {
-  const angel = ALL_ATTACK.find((c) => c.name === "Angel Sahur")!;
-  return { ...angel, id: `${angel.id}#primary`, currentHP: angel.maxHP, level: 5, grade: "B", title: null };
+  // ANGEL TUNG — the locked Main Character. Modest grounded stats, a Tung-Sahur-angel hybrid.
+  return {
+    id: "atk-0#primary",
+    name: "Angel Tung",
+    role: "Attack",
+    rarity: "Monarch",
+    element: "Light",
+    stat: 55,
+    maxHP: 280, currentHP: 280,
+    attackPower: 50, defensePower: 40, healPower: 10,
+    skillName: "Holy Drumbeat",
+    level: 5, grade: "B", title: null,
+    design: "A halo'd cherub-Tung hybrid clutching a tiny bat-drum",
+    behavior: "Anchors the squad; never leaves your side; relies on companions to carry damage",
+  };
 };
+
+export const MC_PRIMARY_ID = "atk-0#primary";
+export const isPrimary = (c: Character) => c.id.endsWith("#primary");
 
 export const getPrimary = (state: GameState): Character =>
   state.inventory.find((c) => c.id.endsWith("#primary")) ?? seedAngel();
@@ -319,6 +335,37 @@ export const solvePuzzle = (state: GameState, puzzleId: string, choice: number):
   const pen = 15;
   primary.currentHP = Math.max(1, primary.currentHP - pen);
   return { ok: false, message: `✗ Wrong. The path resists you. -${pen} HP.` };
+};
+
+// ---------- PROGRESSION GATES ----------
+// Gate for entering Layer 1: must have an ATK slot equipped OR a SUP slot
+// with the "Cor Leonis" damage-absorb title (interpreted as a stat-decrease debuff).
+export const canEnterLayer1 = (state: GameState): { ok: boolean; reason?: string } => {
+  if (state.attackSlot) return { ok: true };
+  if (state.supportSlot && state.supportSlot.title?.code === "absorb_status") return { ok: true };
+  return {
+    ok: false,
+    reason: "* You cannot face Hell unarmed.\n* Equip an ATK Brainrot — or bring a SUP wielding the Cor Leonis (damage-absorb) title.",
+  };
+};
+
+// Tier gate fires when crossing from L3->L4 and L6->L7.
+// Requires at least one Noble or Monarch in the active loadout.
+export const canCrossTierGate = (state: GameState, targetLayer: number): { ok: boolean; reason?: string } => {
+  if (targetLayer !== 4 && targetLayer !== 7) return { ok: true };
+  const loadout = [state.attackSlot, state.defenseSlot, state.supportSlot].filter(Boolean) as Character[];
+  const hasRoyalty = loadout.some((c) => c.rarity === "Noble" || c.rarity === "Monarch");
+  if (hasRoyalty) return { ok: true };
+  return {
+    ok: false,
+    reason: "* Your squad lacks the royal authority to descend deeper.\n* Pull higher tier Nobles or Monarchs to pass.",
+  };
+};
+
+export const completeTutorial = (state: GameState) => {
+  state.tutCompleted = true;
+  state.currentMap = 1;
+  state.scene = "overworld";
 };
 
 // ---------- LAYER MAP NAV ----------
