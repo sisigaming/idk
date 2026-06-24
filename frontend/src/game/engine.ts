@@ -1,26 +1,32 @@
 // ============================================================
-// BRAINROT RPG — Core State Engine v2
-// Rarity gacha, traits, evolution, Undertale-style combat
+// BRAINROT RPG — Core State Engine v3
+// + Elements, counter matrix, dynamic gacha pools
+// + Side quests, hub maps, currentLayer state
 // ============================================================
 
 import {
+  ALL_ATTACK,
   EvolveCost,
   EvolveOrder,
   GradeOrder,
+  LayerElement,
   LayersOfHell,
   PullCost,
+  QUESTS,
   RarityRates,
   TitleDropRates,
   Titles,
   TraitPullCost,
   findBaseById,
-  getRarityPool,
+  getActivePool,
+  getRarityPoolByLayer,
   gradeMultiplier,
 } from "./data";
 
 // ---------- TYPES ----------
 export type Role = "Attack" | "Defense" | "Support";
 export type Rarity = "Common" | "Uncommon" | "Knight" | "Noble" | "Monarch";
+export type Element = "Nature" | "Ground" | "Fire" | "Water" | "Light" | "Dark";
 
 export interface TitleTrait {
   name: string;
@@ -34,6 +40,8 @@ export interface Character {
   name: string;
   role: Role;
   rarity: Rarity;
+  element: Element;
+  stat: number; // 1..100 base
   maxHP: number;
   currentHP: number;
   attackPower: number;
@@ -41,12 +49,12 @@ export interface Character {
   healPower: number;
   skillName: string;
   level: number;
-  grade: string;        // "F-" .. "Z"
+  grade: string;
   title: TitleTrait | null;
 }
 
 export interface BossPhase {
-  hpThreshold: number; // ratio of currentHP/maxHP that triggers
+  hpThreshold: number;
   name: string;
   atkBonus: number;
   message: string;
@@ -66,14 +74,49 @@ export interface NpcDialogue {
   lines: string[];
 }
 
+export interface HubMapDef {
+  id: number;
+  name: string;
+  element: Element;
+  bgColor: string;
+  accent: string;
+  cols: number;
+  rows: number;
+  exit: { col: number; row: number };
+  villagers: {
+    id: string;
+    name: string;
+    col: number;
+    row: number;
+    color: string;
+    questId?: string;
+    lines: string[];
+  }[];
+}
+
+export interface Quest {
+  id: string;
+  title: string;
+  description: string;
+  requiredLayer: number;
+  targetNPC: string;
+  targetObjective: string;
+  reward: number;
+  isAccepted: boolean;
+  isCompleted: boolean;
+  isClaimed?: boolean;
+}
+
 // ---------- GAME STATE ----------
 export type Scene =
   | "overworld"
   | "gacha"
   | "trait_gacha"
   | "dialog"
+  | "villager_dialog"
   | "inventory"
   | "combat"
+  | "travel"
   | "victory"
   | "defeat";
 
@@ -81,12 +124,12 @@ export interface CombatState {
   layer: number;
   enemy: Character;
   enemyMaxHP: number;
-  primary: Character;       // Angel Sahur (player avatar)
+  primary: Character;
   attackSlot: Character | null;
   supportSlot: Character | null;
   log: string[];
   awaiting: "menu" | "fight" | "act" | "item" | "mercy";
-  currentPhase: number; // index into bossPhases that has triggered
+  currentPhase: number;
   spared: boolean;
   ended: "win" | "lose" | null;
 }
@@ -94,37 +137,46 @@ export interface CombatState {
 export interface GameState {
   spaghettiCoins: number;
   inventory: Character[];
-  // Squad slots for Angel Sahur (primary) combat.
   attackSlot: Character | null;
   supportSlot: Character | null;
   highestLayerCleared: number;
+  currentLayer: number; // 1..9, target layer (drives gacha pool)
+  // Map navigation
+  currentMap: number; // 1 = realm, 10..13 = hubs
   // Scene control
   scene: Scene;
   gachaBanner: Role | null;
   dialogNpc: string | null;
+  villagerId: string | null;
   combat: CombatState | null;
-  // Toast / overlay message
   flash: string | null;
+  // Quests
+  quests: Quest[];
 }
 
 export const createGameState = (): GameState => ({
   spaghettiCoins: 100,
-  inventory: [seedAngel()], // Angel Sahur is always the primary; in inventory for completeness
+  inventory: [seedAngel()],
   attackSlot: null,
   supportSlot: null,
   highestLayerCleared: 0,
+  currentLayer: 1,
+  currentMap: 1,
   scene: "overworld",
   gachaBanner: null,
   dialogNpc: null,
+  villagerId: null,
   combat: null,
   flash: null,
+  quests: QUESTS.map((q) => ({ ...q })),
 });
 
 const seedAngel = (): Character => {
-  const angel = findBaseById("m-1")!;
+  // Angel Sahur is the first ATK Monarch entry.
+  const angel = ALL_ATTACK.find((c) => c.name === "Angel Sahur")!;
   return {
     ...angel,
-    id: `m-1#primary`,
+    id: `${angel.id}#primary`,
     currentHP: angel.maxHP,
     level: 5,
     grade: "B",
@@ -132,17 +184,12 @@ const seedAngel = (): Character => {
   };
 };
 
-export const getPrimary = (state: GameState): Character => {
-  return (
-    state.inventory.find((c) => c.id.startsWith("m-1#")) ?? seedAngel()
-  );
-};
+export const getPrimary = (state: GameState): Character =>
+  state.inventory.find((c) => c.id.endsWith("#primary")) ?? seedAngel();
 
-// ---------- HELPERS ----------
-const rand = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+// ---------- EFFECTIVE STATS ----------
 const clone = (c: Character): Character => ({ ...c, currentHP: c.maxHP });
 
-// Effective stat after grade + level scaling.
 const effectiveAtk = (c: Character) =>
   Math.round(c.attackPower * gradeMultiplier(c.grade) * (1 + (c.level - 1) * 0.1));
 const effectiveDef = (c: Character) =>
@@ -152,9 +199,30 @@ const effectiveHeal = (c: Character) =>
 const effectiveMaxHP = (c: Character) =>
   Math.round(c.maxHP * gradeMultiplier(c.grade) * (1 + (c.level - 1) * 0.08));
 
+// ---------- ELEMENTAL COUNTER MATRIX ----------
+// Returns: { attackerMult, defenderMult } applied to outgoing damage.
+// Light vs Dark/Boss = 2.0x.
+export const elementMultiplier = (
+  attacker: Element,
+  defender: Element,
+  isBoss = false,
+): { mult: number; tag: "advantage" | "resist" | "neutral" | "super" } => {
+  if (attacker === "Light" && (defender === "Dark" || isBoss)) {
+    return { mult: 2.0, tag: "super" };
+  }
+  const counters: Partial<Record<Element, Element>> = {
+    Nature: "Ground",
+    Ground: "Fire",
+    Fire: "Water",
+    Water: "Nature",
+  };
+  if (counters[attacker] === defender) return { mult: 1.5, tag: "advantage" };
+  if (counters[defender] === attacker) return { mult: 0.7, tag: "resist" };
+  return { mult: 1.0, tag: "neutral" };
+};
+
 // ---------- RARITY ROLL ----------
 const rollRarity = (luckMultiplier = 1): Rarity => {
-  // Multiply rare odds by luckMultiplier and re-normalize.
   const base = { ...RarityRates } as Record<Rarity, number>;
   base.Monarch *= luckMultiplier;
   base.Noble *= luckMultiplier;
@@ -169,47 +237,57 @@ const rollRarity = (luckMultiplier = 1): Rarity => {
   return "Common";
 };
 
-// ---------- GACHA: characters ----------
+const rand = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+
+// ---------- GACHA: characters (now layer-aware) ----------
 export interface GachaResult {
   success: boolean;
   message: string;
   character?: Character;
   rarity?: Rarity;
+  element?: Element;
 }
 
-export const pullGacha = (
-  state: GameState,
-  banner: Role,
-): GachaResult => {
+export const pullGacha = (state: GameState, banner: Role): GachaResult => {
   if (state.spaghettiCoins < PullCost) {
     return { success: false, message: `Not enough coins. Need ${PullCost}.` };
   }
   state.spaghettiCoins -= PullCost;
 
-  // Apply Dazzling Prince luck boost if primary holds it
   const primary = getPrimary(state);
   const luck = primary.title?.code === "luck_boost" ? 1.5 : 1;
+
+  // Special rules
   let rarity = rollRarity(luck);
-  let pool = getRarityPool(rarity, banner);
-  // If banner+rarity is empty (e.g., no Noble Defense), downgrade rarity.
+  let pool = getRarityPoolByLayer(rarity, banner, state.currentLayer);
+
+  // L9 forces Light → only Monarchs exist in pool
+  if (LayerElement[state.currentLayer] === "Light") {
+    rarity = "Monarch";
+    pool = getRarityPoolByLayer("Monarch", banner, state.currentLayer);
+  }
+
+  // Fallback if pool empty at this rarity, downgrade
   while (pool.length === 0) {
     const i = EvolveOrder.indexOf(rarity);
     if (i <= 0) {
-      pool = getRarityPool("Common", banner);
+      pool = getActivePool(banner, state.currentLayer);
       rarity = "Common";
       break;
     }
     rarity = EvolveOrder[i - 1];
-    pool = getRarityPool(rarity, banner);
+    pool = getRarityPoolByLayer(rarity, banner, state.currentLayer);
   }
+
   const drawn = clone(rand(pool));
   drawn.id = `${drawn.id}#${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   state.inventory.push(drawn);
   return {
     success: true,
     rarity,
+    element: drawn.element,
     character: drawn,
-    message: `[${rarity}] ${drawn.name} — ${drawn.role}. HP ${drawn.maxHP} · ATK ${Math.round(drawn.attackPower)} · "${drawn.skillName}"`,
+    message: `[${rarity}|${drawn.element}] ${drawn.name} — ${drawn.role}. HP ${drawn.maxHP} · ATK ${effectiveAtk(drawn)} · "${drawn.skillName}"`,
   };
 };
 
@@ -223,7 +301,6 @@ export interface TraitResult {
 }
 
 const rollGrade = (luck = 1): string => {
-  // Heavily weight middle grades; rare grades S/Z if luck applies
   const weights: Record<string, number> = {
     "F-": 4, F: 6, "D-": 8, D: 10, "D+": 10, "C-": 12, C: 14, "C+": 12,
     "B-": 10, B: 8, "B+": 6, "A-": 4, A: 3, "A+": 2, S: 0.7 * luck, Z: 0.3 * luck,
@@ -255,10 +332,7 @@ const rollTitle = (luck = 1): TitleTrait | null => {
   return null;
 };
 
-export const pullTrait = (
-  state: GameState,
-  targetId: string,
-): TraitResult => {
+export const pullTrait = (state: GameState, targetId: string): TraitResult => {
   if (state.spaghettiCoins < TraitPullCost) {
     return { success: false, message: `Trait pull costs ${TraitPullCost} coins.` };
   }
@@ -272,92 +346,75 @@ export const pullTrait = (
   const title = rollTitle(luck);
   target.grade = grade;
   target.title = title;
-
   return {
     success: true,
     targetId,
     grade,
     title,
     message: title
-      ? `Trait roll → Grade ${grade} · Title: "${title.name}" (${title.ability})`
+      ? `Trait roll → Grade ${grade} · Title: "${title.name}"`
       : `Trait roll → Grade ${grade} · No title.`,
   };
 };
 
 // ---------- EVOLUTION ----------
-// Consume N duplicates of same brainrot (by base id prefix) to evolve to next rarity.
-export interface EvolveResult {
-  success: boolean;
-  message: string;
-}
-
 const baseIdOf = (id: string) => id.split("#")[0];
 
-export const evolveCharacter = (
-  state: GameState,
-  targetId: string,
-): EvolveResult => {
+export interface EvolveResult { success: boolean; message: string }
+
+export const evolveCharacter = (state: GameState, targetId: string): EvolveResult => {
   const target = state.inventory.find((c) => c.id === targetId);
   if (!target) return { success: false, message: "Target not found." };
-  if (target.rarity === "Monarch") {
-    return { success: false, message: "Monarchs cannot evolve further." };
-  }
+  if (target.rarity === "Monarch") return { success: false, message: "Monarchs cannot evolve further." };
   const cost = EvolveCost[target.rarity as Exclude<Rarity, "Monarch">];
   const sameBase = state.inventory.filter(
     (c) => c.id !== targetId && baseIdOf(c.id) === baseIdOf(target.id),
   );
   if (sameBase.length < cost) {
-    return {
-      success: false,
-      message: `Need ${cost} duplicates of ${target.name}. You have ${sameBase.length}.`,
-    };
+    return { success: false, message: `Need ${cost} duplicates. Have ${sameBase.length}.` };
   }
-  // Consume duplicates
   const consumeIds = new Set(sameBase.slice(0, cost).map((c) => c.id));
   state.inventory = state.inventory.filter((c) => !consumeIds.has(c.id));
 
-  // Promote to next rarity preserving role
+  // Promote: find a higher-rarity character of the same banner role
   const nextRarity = EvolveOrder[EvolveOrder.indexOf(target.rarity) + 1];
-  const candidates = getRarityPool(nextRarity, target.role);
-  if (candidates.length === 0) {
-    return { success: false, message: `No ${nextRarity} ${target.role} available.` };
-  }
-  const evolvedBase = candidates[0];
-  target.id = `${evolvedBase.id}#${Date.now()}`;
-  target.name = evolvedBase.name;
+  // Search global pool for an entry of same role + next rarity
+  const findBase = findBaseById(target.id);
+  if (!findBase) return { success: false, message: "Base not found." };
+  // Simple: keep same name, just bump rarity stats by +25% and tag
   target.rarity = nextRarity;
-  target.maxHP = evolvedBase.maxHP;
-  target.currentHP = evolvedBase.maxHP;
-  target.attackPower = evolvedBase.attackPower;
-  target.defensePower = evolvedBase.defensePower;
-  target.healPower = evolvedBase.healPower;
-  target.skillName = evolvedBase.skillName;
+  target.stat = Math.min(100, Math.round(target.stat * 1.25));
+  target.maxHP = Math.round(target.maxHP * 1.35);
+  target.attackPower = Math.round(target.attackPower * 1.3);
+  target.defensePower = Math.round(target.defensePower * 1.3);
+  target.healPower = Math.round(target.healPower * 1.3);
   target.level = Math.min(99, target.level + 2);
-  return {
-    success: true,
-    message: `EVOLVED → ${target.name} [${nextRarity}] (Lv ${target.level}).`,
-  };
+  target.currentHP = target.maxHP;
+  return { success: true, message: `EVOLVED → ${target.name} [${nextRarity}] (Lv ${target.level}).` };
 };
 
-// ---------- SQUAD MAPPING ----------
+// ---------- SLOTS ----------
 export const setAttackSlot = (state: GameState, id: string | null) => {
-  if (id === null) {
-    state.attackSlot = null;
-    return;
-  }
+  if (id === null) { state.attackSlot = null; return; }
   const c = state.inventory.find((x) => x.id === id);
   if (c && c.role === "Attack") state.attackSlot = c;
 };
 export const setSupportSlot = (state: GameState, id: string | null) => {
-  if (id === null) {
-    state.supportSlot = null;
-    return;
-  }
+  if (id === null) { state.supportSlot = null; return; }
   const c = state.inventory.find((x) => x.id === id);
   if (c && c.role === "Support") state.supportSlot = c;
 };
 
-// ---------- UNDERTALE COMBAT ----------
+// ---------- LAYER / MAP NAV ----------
+export const setCurrentLayer = (state: GameState, layer: number) => {
+  state.currentLayer = Math.max(1, Math.min(9, layer));
+};
+export const setCurrentMap = (state: GameState, mapId: number) => {
+  state.currentMap = mapId;
+  state.scene = "overworld";
+};
+
+// ---------- COMBAT ----------
 export const startCombat = (state: GameState, layerNum: number): boolean => {
   const layer = LayersOfHell.find((l) => l.layer === layerNum);
   if (!layer) return false;
@@ -365,7 +422,7 @@ export const startCombat = (state: GameState, layerNum: number): boolean => {
   const enemy: Character = { ...enemyBase, currentHP: enemyBase.maxHP };
   const primary = { ...getPrimary(state) };
   primary.currentHP = effectiveMaxHP(primary);
-
+  state.currentLayer = layerNum;
   state.combat = {
     layer: layerNum,
     enemy,
@@ -375,7 +432,8 @@ export const startCombat = (state: GameState, layerNum: number): boolean => {
     supportSlot: state.supportSlot ? { ...state.supportSlot } : null,
     log: [
       `* You descend into Layer ${layer.layer}: ${layer.title}.`,
-      `* ${enemy.name} blocks your path!`,
+      `* The air carries ${enemy.element.toUpperCase()} essence.`,
+      `* ${enemy.name} [${enemy.element}] blocks your path!`,
     ],
     awaiting: "menu",
     currentPhase: -1,
@@ -388,24 +446,26 @@ export const startCombat = (state: GameState, layerNum: number): boolean => {
 
 const pushLog = (cs: CombatState, line: string) => {
   cs.log.push(line);
-  if (cs.log.length > 60) cs.log.splice(0, cs.log.length - 60);
+  if (cs.log.length > 80) cs.log.splice(0, cs.log.length - 80);
 };
 
 const enemyAttack = (state: GameState) => {
   const cs = state.combat!;
-  let dmg = Math.max(1, cs.enemy.attackPower - effectiveDef(cs.primary));
-  // Apply title abilities defensively
+  // Enemy element vs primary element (Angel Sahur = Light, will resist Dark less)
+  const m = elementMultiplier(cs.enemy.element, cs.primary.element);
+  let raw = Math.max(1, cs.enemy.attackPower - effectiveDef(cs.primary));
+  let dmg = Math.round(raw * m.mult);
   if (cs.primary.title?.code === "redistribute_damage") {
-    // Spread damage across attack + support slots as well
     const targets = [cs.primary, cs.attackSlot, cs.supportSlot].filter(Boolean) as Character[];
     const each = Math.ceil(dmg / targets.length);
     targets.forEach((t) => (t.currentHP = Math.max(0, t.currentHP - each)));
-    pushLog(cs, `* ${cs.enemy.name} strikes! Damage ${dmg} split ${each} each across the squad.`);
+    pushLog(cs, `* ${cs.enemy.name} strikes! ${dmg} dmg split ${each} each (Little King).`);
     dmg = 0;
   }
   if (dmg > 0) {
     cs.primary.currentHP = Math.max(0, cs.primary.currentHP - dmg);
-    pushLog(cs, `* ${cs.enemy.name} uses "${cs.enemy.skillName}" → Angel Sahur takes ${dmg} dmg.`);
+    const tag = m.tag === "advantage" ? " [enemy advantage]" : m.tag === "resist" ? " [you resist]" : m.tag === "super" ? " [SUPER]" : "";
+    pushLog(cs, `* ${cs.enemy.name} "${cs.enemy.skillName}" → Angel Sahur takes ${dmg} dmg${tag}.`);
   }
   if (cs.primary.currentHP <= 0) {
     cs.ended = "lose";
@@ -431,23 +491,15 @@ const checkBossPhase = (state: GameState) => {
 export const combatFight = (state: GameState) => {
   const cs = state.combat;
   if (!cs || cs.ended) return;
-  if (!cs.attackSlot) {
-    pushLog(cs, `* No Attack Brainrot equipped. Use the inventory house.`);
-    return;
-  }
-  const dmg = Math.max(
-    1,
-    effectiveAtk(cs.attackSlot) - cs.enemy.defensePower,
-  );
+  if (!cs.attackSlot) { pushLog(cs, `* No Attack Brainrot equipped.`); return; }
+  const isBoss = LayersOfHell.find((l) => l.layer === cs.layer)?.isFinal === true;
+  const m = elementMultiplier(cs.attackSlot.element, cs.enemy.element, isBoss);
+  const raw = Math.max(1, effectiveAtk(cs.attackSlot) - cs.enemy.defensePower);
+  const dmg = Math.round(raw * m.mult);
   cs.enemy.currentHP = Math.max(0, cs.enemy.currentHP - dmg);
-  pushLog(
-    cs,
-    `* You call on ${cs.attackSlot.name}! "${cs.attackSlot.skillName}" → ${dmg} dmg. ${cs.enemy.name} HP ${cs.enemy.currentHP}/${cs.enemyMaxHP}.`,
-  );
-  if (cs.enemy.currentHP <= 0) {
-    endCombat(state, true);
-    return;
-  }
+  const tag = m.tag === "super" ? " [LIGHT SUPER ×2.0]" : m.tag === "advantage" ? " [×1.5 advantage]" : m.tag === "resist" ? " [×0.7 resisted]" : "";
+  pushLog(cs, `* ${cs.attackSlot.name} [${cs.attackSlot.element}] uses "${cs.attackSlot.skillName}" → ${dmg} dmg${tag}. (${cs.enemy.currentHP}/${cs.enemyMaxHP})`);
+  if (cs.enemy.currentHP <= 0) { endCombat(state, true); return; }
   checkBossPhase(state);
   enemyAttack(state);
 };
@@ -455,17 +507,11 @@ export const combatFight = (state: GameState) => {
 export const combatItem = (state: GameState) => {
   const cs = state.combat;
   if (!cs || cs.ended) return;
-  if (!cs.supportSlot) {
-    pushLog(cs, `* No Support Brainrot equipped.`);
-    return;
-  }
+  if (!cs.supportSlot) { pushLog(cs, `* No Support Brainrot equipped.`); return; }
   const heal = effectiveHeal(cs.supportSlot);
   const maxhp = effectiveMaxHP(cs.primary);
   cs.primary.currentHP = Math.min(maxhp, cs.primary.currentHP + heal);
-  pushLog(
-    cs,
-    `* ${cs.supportSlot.name} sings "${cs.supportSlot.skillName}". +${heal} HP. (${cs.primary.currentHP}/${maxhp})`,
-  );
+  pushLog(cs, `* ${cs.supportSlot.name} [${cs.supportSlot.element}] sings "${cs.supportSlot.skillName}". +${heal} HP. (${cs.primary.currentHP}/${maxhp})`);
   checkBossPhase(state);
   enemyAttack(state);
 };
@@ -480,7 +526,7 @@ export const combatAct = (state: GameState) => {
     `* You offer them a sip of espresso. They consider it.`,
   ];
   pushLog(cs, rand(flavor));
-  cs.spared = true; // marks mercy as available
+  cs.spared = true;
   enemyAttack(state);
 };
 
@@ -502,12 +548,14 @@ const endCombat = (state: GameState, won: boolean) => {
   if (won) {
     let reward = 15 + cs.layer * 5;
     const primary = getPrimary(state);
-    if (primary.title?.code === "coin_boost") {
-      reward = Math.round(reward * 1.25);
-    }
+    if (primary.title?.code === "coin_boost") reward = Math.round(reward * 1.25);
     state.spaghettiCoins += reward;
     state.highestLayerCleared = Math.max(state.highestLayerCleared, cs.layer);
+    setCurrentLayer(state, Math.min(9, state.highestLayerCleared + 1));
     pushLog(cs, `* VICTORY. +${reward} Spaghetti Coins.`);
+    // Quest completion check
+    const newlyCompleted = tryCompleteQuests(state, cs.layer);
+    newlyCompleted.forEach((q) => pushLog(cs, `* Quest progress: "${q.title}" — ready to claim.`));
     state.scene = "victory";
   } else {
     state.scene = "defeat";
@@ -519,13 +567,38 @@ export const closeCombat = (state: GameState) => {
   state.scene = "overworld";
 };
 
-// ---------- DEBUG: pretty stats ----------
-export const inspect = (c: Character): string =>
-  `${c.name} [${c.rarity}|${c.role}|Lv${c.level}|G:${c.grade}] HP ${effectiveMaxHP(c)} · ATK ${effectiveAtk(c)} · DEF ${effectiveDef(c)} · HEAL ${effectiveHeal(c)}${c.title ? ` · "${c.title.name}"` : ""}`;
-
-export {
-  effectiveAtk,
-  effectiveDef,
-  effectiveHeal,
-  effectiveMaxHP,
+// ---------- QUESTS ----------
+export const acceptQuest = (state: GameState, questId: string) => {
+  const q = state.quests.find((x) => x.id === questId);
+  if (q && !q.isAccepted) q.isAccepted = true;
 };
+
+export const tryCompleteQuests = (state: GameState, layerCleared: number) => {
+  const completed: Quest[] = [];
+  state.quests.forEach((q) => {
+    if (q.isAccepted && !q.isCompleted && q.requiredLayer === layerCleared) {
+      q.isCompleted = true;
+      completed.push(q);
+    }
+  });
+  return completed;
+};
+
+export const claimQuest = (state: GameState, questId: string): { ok: boolean; message: string } => {
+  const q = state.quests.find((x) => x.id === questId);
+  if (!q) return { ok: false, message: "Quest not found." };
+  if (!q.isCompleted) return { ok: false, message: "Objective not yet complete." };
+  if (q.isClaimed) return { ok: false, message: "Reward already claimed." };
+  q.isClaimed = true;
+  state.spaghettiCoins += q.reward;
+  return { ok: true, message: `+${q.reward} ◆ from "${q.title}".` };
+};
+
+export const getQuestByNpc = (state: GameState, npcId: string): Quest | undefined =>
+  state.quests.find((q) => q.targetNPC === npcId);
+
+// ---------- DEBUG INSPECT ----------
+export const inspect = (c: Character): string =>
+  `${c.name} [${c.rarity}|${c.element}|${c.role}|Lv${c.level}|G:${c.grade}|S${c.stat}] HP ${effectiveMaxHP(c)} · ATK ${effectiveAtk(c)} · DEF ${effectiveDef(c)} · HEAL ${effectiveHeal(c)}${c.title ? ` · "${c.title.name}"` : ""}`;
+
+export { effectiveAtk, effectiveDef, effectiveHeal, effectiveMaxHP };

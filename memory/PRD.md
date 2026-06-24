@@ -1,33 +1,33 @@
-# Brainrot RPG — Undertale-style 2.5D Pixel Realm
+# Brainrot RPG — Elemental Multi-Map RPG
 
-## What's built
-A single Expo (React Native Web) screen running a TS state engine + an Undertale-flavored pixel overworld. All on-device, no backend, no external integrations.
+## What's built (TS state engine + Expo Web pixel overworld)
+A 13-map Brainrot RPG with dynamic elemental gacha, side quests, and Undertale-style combat.
 
 ## State engine (`/app/frontend/src/game/`)
-- **`data.ts`**: 5-rank rarity tables (Common 40 · Uncommon 30 · Knight 20.9 · Noble 1.0 · Monarch 0.7 — Heavenly Virtues), pools split by role, 16-grade trait scale (`F-`→`Z` mapped to −20 % … +20 %), 4 title traits (`Little King`, `Cor Leonis`, `The Noble-man`, `The Dazzling Prince`) with their exact abilities, 9 Layers of Hell with scaled enemy stats and boss phases (Final Boss `Evil Tung Tung Sahur` @ 10 000 HP with 2 rage phases), NPC dialogue trees.
-- **`engine.ts`**: weighted `pullGacha`, `pullTrait` (grade + title roll, luck-boosted by Dazzling Prince), `evolveCharacter` (cost-based, promotes rarity), `effectiveAtk/Def/Heal/MaxHP` with grade × level scaling, `startCombat / combatFight / combatItem / combatAct / combatMercy`, boss-phase trigger logic, post-combat coin reward with Noble-man +25 % bonus.
-- **`store.ts`**: Tiny pub-sub `useGameState()` so the whole UI re-renders on `setState((s) => …)`.
+- **`data.ts`**:
+  - `Element` union (`Nature | Ground | Fire | Water | Light | Dark`) with counter map and per-layer element table (L1 Nature, L2-3 Ground, L4-5 Fire, L6-7 Water, L8 Dark/Corrupted, L9 Light-only).
+  - Explicit 60-character roster: `ATTACK_ROSTER`, `DEFENSE_ROSTER`, `SUPPORT_ROSTER`, 20 each, stats banded by rarity (Common 1-30 · Uncommon 31-50 · Knight 51-75 · Noble 76-94 · Monarch 95-100). Stats not encoded with location names.
+  - `LayersOfHell` 1-9 each with element-tagged enemies and boss phases on L9.
+  - 4 hub maps (`HUB_MAPS`): Villaggio di Spaghetti (Nature, 5 villagers), Terra di Cannoli (Ground, 4), Vulcano del Caffè (Fire, 4), Oceano di Limoncello (Water, 5).
+  - `QUESTS` array with id, title, description, requiredLayer, targetNPC, targetObjective, reward, isAccepted, isCompleted, isClaimed.
+- **`engine.ts`**:
+  - `elementMultiplier(attacker, defender, isBoss)` — 1.5× advantage / 0.7× resist via rock-paper-scissors loop; Light × Dark/Boss = 2.0× super.
+  - `pullGacha(state, banner)` filters pool by `state.currentLayer` element (L9 → Monarch Light only; L8 → corrupted Knight/Noble re-tagged Dark).
+  - Layer-based dynamic banner config — `currentLayer` updates after each clear and re-themes all 3 portals.
+  - Quest API: `acceptQuest`, `tryCompleteQuests(layer)` runs at combat victory, `claimQuest` pays reward.
+  - `combatFight` / enemy retaliation both apply `elementMultiplier` and log `[×1.5 advantage / ×0.7 resisted / LIGHT SUPER ×2.0]` tags.
 
-## Pixel overworld (`/app/frontend/app/index.tsx`)
-- 13 × 18 tile grid (22 px tiles), grass checker pattern, black border walls.
-- 7 buildings, each rendered as 3 × 2 pixel sprite with a colored roof / body + label, and a yellow door tile that triggers a scene on walk-in:
-  - 3 gacha portals — **ATK** (red), **DEF** (blue), **SUP** (purple)
-  - 2 NPC houses — Spaghetti Merchant + Layer Guardian (Undertale typewriter dialog)
-  - 1 **HOME** — inventory / team / evolve / trait pull
-  - 1 **???** decorative-only building
-- Angel Sahur sprite (halo · head · robe · drum) drawn from layered colored `View`s.
-- D-pad + WASD/arrow-key movement (single-tile, collision-aware).
-- HUD pills: coins · highest layer cleared · inventory count.
+## Overworld (`app/index.tsx`)
+- One scene-manager screen that renders either the original 13×18 realm map (with `TRAVEL` building added) or any of the 4 hub maps (10×12) from a `MapDef`.
+- HUD pills: coins, current layer, **active element** (color-coded), inventory count.
+- Villager NPCs are 1-tile sprites with quest badges: `?` available · `!` in progress · `★` ready to claim · *(none)* claimed.
+- Cyan `EXIT` tile at the bottom of every hub returns to the realm.
+- Scenes: overworld · gacha (element-themed) · realm-NPC dialog · villager dialog + quest panel · inventory · travel · combat · victory/defeat.
 
-## Scenes
-- **Gacha** — banner-colored frame, shows real drop rates, card flips in with rarity tint after pull.
-- **Dialog** — black box + white border, typewriter text, portrait, ▼ tap-to-continue.
-- **Inventory** — equip ATK/SUP slot, evolve (consumes duplicates), trait pull (25 G).
-- **Combat** — pure Undertale: enemy blob at top, HP bars, black action box, FIGHT/ACT/ITEM/MERCY menu, no visible player.
-- **Victory / Defeat** — reward summary, log tail, return-to-realm button.
-
-## Verified visually
-Gacha pull (got `Frothy Fiend` Uncommon), inventory with 7 brainrots across all rarities, slot equip, Layer 1 combat: `Frothy Fiend` → 120 dmg via "Foam Smother", `Boneca Ambalabu` heal +101, ACT spare attempt, enemy retaliate with grade-scaled damage reduction.
+## Verified live
+- L1 ATK portal shows "ATTACK PORTAL — NATURE", drops Nature roster (pulled `Canarino Feroce` Uncommon Nature).
+- TRAVEL menu lists Brainrot Realm + 4 element hubs with correct villager/quest counts.
+- Entering Villaggio di Spaghetti renders 5 villagers + EXIT tile; walking into Olio Verde opens typewriter dialog → "Olives & Sprites" quest panel → ACCEPT toggles status to IN PROGRESS → badge on map changes `?` → `!`.
 
 ## Out of scope
-Persistence, AI-generated dialogue, sound, animations, image gen for sprites.
+Persistence, AI dialogue, sound, real animation, sprite art (stylized blocks only).
