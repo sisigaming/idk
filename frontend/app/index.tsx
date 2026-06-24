@@ -10,11 +10,12 @@ import {
 } from "@/src/game/data";
 import {
   acceptQuest, claimQuest, closeCombat, combatAct, combatFight, combatItem, combatMercy,
-  createGameState, DAMAGE_CAP, deleteSlot, effectiveMaxHP, Element, enterLayerMap, evolveCharacter, GameState,
+  createGameState, deleteSlot, effectiveMaxHP, Element, enterLayerMap, evolveCharacter, GameState,
   inspect, inspectSlot, isLayerMap, loadSlot, puzzleAt, pullGacha, pullTrait, Rarity, resolveReaction, Role,
   saveSlot, SaveMeta, setAttackSlot, setDefenseSlot, setSupportSlot, solvePuzzle, startCombat, timingMultiplier,
 } from "@/src/game/engine";
 import { getState, replaceState, setState, useGameState } from "@/src/game/store";
+import { storage } from "@/src/utils/storage";
 
 // ============================================================
 const TILE = 22;
@@ -51,11 +52,11 @@ const REALM_PORTALS: Portal[] = [
   { col: 11, row: 16, targetMap: 13, color: "#3b82f6", label: "▼W" },
 ];
 
-// Central layer-descend stair on row 15
+// Central layer-descend stair on row 15 (physical transition to current Hell Layer's map)
 const LAYER_STAIR = { col: 6, row: 15, color: "#dc2626", label: "▼L" };
 
 const buildRealmTiles = () => {
-  const m: Record<string, { block: boolean; trigger?: BuildingKind | "portal"; portal?: Portal }> = {};
+  const m: Record<string, { block: boolean; trigger?: BuildingKind | "portal" | "layer_stair"; portal?: Portal }> = {};
   for (let c = 0; c < REALM_COLS; c++) { m[`${c},0`] = { block: true }; m[`${c},${REALM_ROWS - 1}`] = { block: true }; }
   for (let r = 0; r < REALM_ROWS; r++) { m[`0,${r}`] = { block: true }; m[`${REALM_COLS - 1},${r}`] = { block: true }; }
   REALM_BUILDINGS.forEach((b) => {
@@ -63,6 +64,7 @@ const buildRealmTiles = () => {
     if (b.door) m[`${b.door.col},${b.door.row}`] = { block: false, trigger: b.kind };
   });
   REALM_PORTALS.forEach((p) => { m[`${p.col},${p.row}`] = { block: false, trigger: "portal", portal: p }; });
+  m[`${LAYER_STAIR.col},${LAYER_STAIR.row}`] = { block: false, trigger: "layer_stair" };
   return m;
 };
 const REALM_TILES = buildRealmTiles();
@@ -78,18 +80,36 @@ export default function Index() {
   const posRef = useRef(pos);
   posRef.current = pos;
   const [trapFlash, setTrapFlash] = useState<string | null>(null);
+  const [showTutorial, setShowTutorial] = useState(false);
+
+  // Show tutorial on first overworld visit if not seen before
+  useEffect(() => {
+    if (state.scene !== "overworld" || state.currentMap !== 1) return;
+    (async () => {
+      const seen = await storage.getItem<string>("brainrot_tutorial_seen_v1", "");
+      if (!seen) setShowTutorial(true);
+    })();
+  }, [state.scene, state.currentMap]);
+
+  const dismissTutorial = async () => {
+    await storage.setItem("brainrot_tutorial_seen_v1", "1");
+    setShowTutorial(false);
+  };
 
   // Restore position when map changes (after loading slot or portal step)
   useEffect(() => {
     if (state.scene !== "overworld") return;
-    const hub = state.currentMap >= 10 ? findHub(state.currentMap) : null;
+    const hub = state.currentMap >= 10 && state.currentMap < 100 ? findHub(state.currentMap) : null;
+    const layerMap = isLayerMap(state.currentMap) ? LAYER_MAPS[state.currentMap] : null;
     const saved = state.positions[state.currentMap];
-    setPos(saved ?? (hub ? playerDefaultHub(hub) : PLAYER_DEFAULT_REALM));
+    const fallback = layerMap ? layerMap.entryPos : hub ? playerDefaultHub(hub) : PLAYER_DEFAULT_REALM;
+    setPos(saved ?? fallback);
     setFacing("down");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.currentMap, state.activeSlot]);
 
-  const currentHub = state.currentMap >= 10 ? findHub(state.currentMap) : null;
+  const currentLayerMap = isLayerMap(state.currentMap) ? LAYER_MAPS[state.currentMap] : null;
+  const currentHub = state.currentMap >= 10 && state.currentMap < 100 ? findHub(state.currentMap) : null;
 
   const flashMsg = (m: string) => {
     setTrapFlash(m);
@@ -100,48 +120,87 @@ export default function Index() {
     if (getState().scene !== "overworld") return;
     setFacing(dir);
     const s = getState();
-    const hub = s.currentMap >= 10 ? findHub(s.currentMap) : null;
+    const hub = s.currentMap >= 10 && s.currentMap < 100 ? findHub(s.currentMap) : null;
+    const layerMap = isLayerMap(s.currentMap) ? LAYER_MAPS[s.currentMap] : null;
     const np = { col: posRef.current.col + dc, row: posRef.current.row + dr };
-    const C = hub ? hub.cols : REALM_COLS;
-    const R = hub ? hub.rows : REALM_ROWS;
+    const C = layerMap ? layerMap.cols : hub ? hub.cols : REALM_COLS;
+    const R = layerMap ? layerMap.rows : hub ? hub.rows : REALM_ROWS;
     if (np.col < 0 || np.row < 0 || np.col >= C || np.row >= R) return;
 
+    // ---------- LAYER MAP MOVEMENT ----------
+    if (layerMap) {
+      if (np.col === 0 || np.row === 0 || np.col === C - 1 || np.row === R - 1) return;
+      // Wall collision (intra-layer dividers)
+      if (layerMap.walls.some((w) => w.col === np.col && w.row === np.row)) return;
+      // Step on boss tile -> mandatory boss fight
+      if (np.col === layerMap.bossPos.col && np.row === layerMap.bossPos.row) {
+        if (!s.attackSlot || !s.supportSlot) {
+          flashMsg("Equip ATK + SUP first (open MENU).");
+          return;
+        }
+        if (s.highestLayerCleared >= layerMap.layerId) {
+          // already cleared this layer's boss — let player pass to exit
+          setPos(np);
+          return;
+        }
+        setPos(np);
+        setState((st) => { st.positions[st.currentMap] = np; startCombat(st, layerMap.layerId); });
+        return;
+      }
+      // Step on exit stair (top) -> only after boss cleared
+      if (np.col === layerMap.exitPos.col && np.row === layerMap.exitPos.row) {
+        if (s.highestLayerCleared < layerMap.layerId) {
+          flashMsg("✗ Defeat the layer boss first!");
+          return;
+        }
+        setPos(np);
+        setState((st) => {
+          st.positions[st.currentMap] = np;
+          st.currentMap = 1;
+          st.positions[1] = { col: LAYER_STAIR.col, row: LAYER_STAIR.row - 1 };
+          st.scene = "overworld";
+        });
+        return;
+      }
+      setPos(np);
+      // Random encounter while traversing layer
+      if (Math.random() < 0.08 && s.attackSlot && s.supportSlot) {
+        setState((st) => { st.positions[st.currentMap] = np; startCombat(st, layerMap.layerId); });
+      }
+      return;
+    }
+
+    // ---------- HUB MOVEMENT ----------
     if (hub) {
       if (np.col === 0 || np.row === 0 || np.col === C - 1 || np.row === R - 1) return;
       const v = hub.villagers.find((x) => x.col === np.col && x.row === np.row);
       if (v) {
         setState((st) => {
-          st.positions[st.currentMap] = posRef.current; // remember entry pos
+          st.positions[st.currentMap] = posRef.current;
           st.scene = "villager_dialog"; st.villagerId = v.id;
         });
         return;
       }
       if (np.col === hub.exit.col && np.row === hub.exit.row) {
-        // Physical exit back to realm at the corresponding portal tile.
         setState((st) => {
           st.positions[st.currentMap] = np;
           const portal = REALM_PORTALS.find((p) => p.targetMap === st.currentMap);
-          if (portal) st.positions[1] = { col: portal.col, row: portal.row - 1 }; // step out above the portal
+          if (portal) st.positions[1] = { col: portal.col, row: portal.row - 1 };
           st.currentMap = 1;
           st.scene = "overworld";
         });
         return;
       }
       setPos(np);
-      // Trap step
-      const trap = stepOnTrapInPlace(np);
-      if (trap) flashMsg(trap);
-      // Random encounter (only if both slots equipped)
       if (Math.random() < 0.05 && s.attackSlot && s.supportSlot) {
         setState((st) => { st.positions[st.currentMap] = np; startCombat(st, st.currentLayer); });
       }
       return;
     }
 
-    // Realm path
+    // ---------- REALM MOVEMENT ----------
     const t = REALM_TILES[`${np.col},${np.row}`];
     if (t?.block) return;
-    // Puzzle check
     const pz = puzzleAt(s, np.col, np.row);
     if (pz) {
       setState((st) => { st.positions[1] = posRef.current; st.scene = "puzzle"; });
@@ -159,6 +218,16 @@ export default function Index() {
       });
       return;
     }
+    if (trig === "layer_stair") {
+      setState((st) => {
+        st.positions[1] = np;
+        enterLayerMap(st, st.currentLayer);
+        // place player at the layer map entry tile
+        const lm = LAYER_MAPS[st.currentMap];
+        if (lm) st.positions[st.currentMap] = lm.entryPos;
+      });
+      return;
+    }
     if (trig) {
       setState((st) => {
         st.positions[1] = np;
@@ -171,23 +240,10 @@ export default function Index() {
       });
       return;
     }
-    // Trap step
-    const trap = stepOnTrapInPlace(np);
-    if (trap) flashMsg(trap);
-    // Random encounter
     if (Math.random() < 0.05 && s.attackSlot && s.supportSlot) {
       setState((st) => { st.positions[st.currentMap] = np; startCombat(st, st.currentLayer); });
     }
   }, []);
-
-  const stepOnTrapInPlace = (np: { col: number; row: number }): string | null => {
-    let msg: string | null = null;
-    setState((st) => {
-      const r = stepOnTrap(st, np.col, np.row);
-      if (r.kind !== "none") msg = r.message ?? null;
-    });
-    return msg;
-  };
 
   // Keyboard for web
   useEffect(() => {
@@ -207,7 +263,7 @@ export default function Index() {
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]} testID="screen-root">
       {state.scene === "title" && <TitleScene />}
       {state.scene === "overworld" && (
-        <Overworld pos={pos} facing={facing} move={move} state={state} hub={currentHub} trapFlash={trapFlash} />
+        <Overworld pos={pos} facing={facing} move={move} state={state} hub={currentHub} layerMap={currentLayerMap} trapFlash={trapFlash} />
       )}
       {state.scene === "gacha" && <GachaScene />}
       {state.scene === "dialog" && <DialogScene />}
@@ -217,6 +273,9 @@ export default function Index() {
       {state.scene === "combat" && <CombatScene />}
       {state.scene === "victory" && <ResultScene win />}
       {state.scene === "defeat" && <ResultScene win={false} />}
+      {showTutorial && state.scene === "overworld" && state.currentMap === 1 && (
+        <TutorialOverlay onClose={dismissTutorial} />
+      )}
     </SafeAreaView>
   );
 }
@@ -322,23 +381,30 @@ function TitleScene() {
 // ============================================================
 // OVERWORLD
 // ============================================================
-function Overworld({ pos, facing, move, state, hub, trapFlash }: {
+function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash }: {
   pos: { col: number; row: number }; facing: Dir;
   move: (dc: number, dr: number, d: Dir) => void;
   state: GameState; hub: ReturnType<typeof findHub> | null;
+  layerMap: typeof LAYER_MAPS[number] | null;
   trapFlash: string | null;
 }) {
-  const cols = hub ? hub.cols : REALM_COLS;
-  const rows = hub ? hub.rows : REALM_ROWS;
+  const cols = layerMap ? layerMap.cols : hub ? hub.cols : REALM_COLS;
+  const rows = layerMap ? layerMap.rows : hub ? hub.rows : REALM_ROWS;
   const layerEl = LayerElement[state.currentLayer];
-  const traps: never[] = []; // traps removed — puzzles take their place
-  const puzzles = PUZZLES_BY_MAP[state.currentMap] ?? [];
+  const puzzles = layerMap ? [] : (PUZZLES_BY_MAP[state.currentMap] ?? []);
   const unsolvedPuzzles = puzzles.filter((p) => !state.solvedPuzzles.includes(p.id));
+  const bossCleared = layerMap ? state.highestLayerCleared >= layerMap.layerId : false;
+  const bgColor = layerMap ? layerMap.bgColor : hub ? hub.bgColor : "#163920";
+  const headerName = layerMap
+    ? `HELL LAYER ${layerMap.layerId} — ${LayerElement[layerMap.layerId].toUpperCase()}`
+    : hub
+    ? hub.name.toUpperCase()
+    : "BRAINROT REALM";
 
   return (
     <View style={styles.overworld}>
       <View style={styles.hud}>
-        <Text style={styles.hudTitle}>* {hub ? hub.name.toUpperCase() : "BRAINROT REALM"}</Text>
+        <Text style={styles.hudTitle}>* {headerName}</Text>
         <View style={styles.hudPills}>
           <Pill testID="hud-coins" label={`◆ ${state.spaghettiCoins}`} />
           <Pill testID="hud-layer" label={`L${state.currentLayer}/9`} />
@@ -354,13 +420,13 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
         </View>
       ) : null}
 
-      <View style={styles.mapWrap}>
-        <View style={[styles.map, { width: cols * TILE, height: rows * TILE, backgroundColor: hub ? hub.bgColor : "#163920" }]} testID="overworld-map">
+      <ScrollView style={styles.mapScroll} contentContainerStyle={styles.mapWrap}>
+        <View style={[styles.map, { width: cols * TILE, height: rows * TILE, backgroundColor: bgColor }]} testID="overworld-map">
           {/* Floor */}
           {Array.from({ length: rows }).map((_, r) =>
             Array.from({ length: cols }).map((__, c) => {
               const isWall = r === 0 || r === rows - 1 || c === 0 || c === cols - 1;
-              const checker = (r + c) % 2 === 0 ? (hub ? hub.bgColor : "#1f4f2a") : (hub ? shade(hub.bgColor, -10) : "#1b4525");
+              const checker = (r + c) % 2 === 0 ? bgColor : shade(bgColor, -10);
               return (
                 <View key={`g-${c}-${r}`} style={{
                   position: "absolute", left: c * TILE, top: r * TILE, width: TILE, height: TILE,
@@ -371,7 +437,57 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
             }),
           )}
 
-          {/* Puzzles */}
+          {/* Layer map walls (intra-section dividers) */}
+          {layerMap && layerMap.walls.map((w, i) => (
+            <View key={`lw-${i}`} style={{
+              position: "absolute", left: w.col * TILE, top: w.row * TILE,
+              width: TILE, height: TILE, backgroundColor: "#0f172a",
+              borderWidth: 2, borderColor: "#1e293b",
+            }}>
+              <View style={{ position: "absolute", left: 3, top: 3, right: 3, bottom: 3, backgroundColor: shade(layerMap.bgColor, -40) }} />
+            </View>
+          ))}
+          {/* Layer signs */}
+          {layerMap && layerMap.signs.map((s, i) => (
+            <View key={`sg-${i}`} style={{
+              position: "absolute", left: s.col * TILE - TILE, top: s.row * TILE - 4,
+              width: TILE * 3, alignItems: "center",
+            }}>
+              <Text style={{ color: "#fde68a", fontFamily: "monospace", fontWeight: "900", fontSize: 8, letterSpacing: 1 }}>{s.text}</Text>
+            </View>
+          ))}
+          {/* Layer section stairs (visual aid only — passable) */}
+          {layerMap && layerMap.sectionStairs.map((st, i) => (
+            <View key={`ss-${i}`} style={{
+              position: "absolute", left: st.col * TILE + 2, top: st.row * TILE + 2,
+              width: TILE - 4, height: TILE - 4, backgroundColor: "#fbbf24",
+              borderWidth: 2, borderColor: "#000", alignItems: "center", justifyContent: "center",
+            }}>
+              <Text style={{ color: "#000", fontFamily: "monospace", fontWeight: "900", fontSize: 9 }}>▲</Text>
+            </View>
+          ))}
+          {/* Layer boss tile */}
+          {layerMap && (
+            <View style={{
+              position: "absolute", left: layerMap.bossPos.col * TILE + 2, top: layerMap.bossPos.row * TILE + 2,
+              width: TILE - 4, height: TILE - 4, backgroundColor: bossCleared ? "#22c55e" : "#7f1d1d",
+              borderWidth: 2, borderColor: "#000", alignItems: "center", justifyContent: "center",
+            }}>
+              <Text style={{ color: "#fff", fontFamily: "monospace", fontWeight: "900", fontSize: 9 }}>{bossCleared ? "✓" : "B"}</Text>
+            </View>
+          )}
+          {/* Layer exit gate */}
+          {layerMap && (
+            <View style={{
+              position: "absolute", left: layerMap.exitPos.col * TILE + 2, top: layerMap.exitPos.row * TILE + 2,
+              width: TILE - 4, height: TILE - 4, backgroundColor: bossCleared ? "#22d3ee" : "#475569",
+              borderWidth: 2, borderColor: "#000", alignItems: "center", justifyContent: "center",
+            }}>
+              <Text style={{ color: "#000", fontFamily: "monospace", fontWeight: "900", fontSize: 8 }}>{bossCleared ? "▲UP" : "✕"}</Text>
+            </View>
+          )}
+
+          {/* Puzzles (realm only) */}
           {unsolvedPuzzles.map((p, i) => (
             <View key={`pz-${i}`} style={{
               position: "absolute", left: p.col * TILE + 3, top: p.row * TILE + 3,
@@ -381,10 +497,9 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
               <Text style={{ color: "#000", fontWeight: "900", fontSize: 11, fontFamily: "monospace" }}>?</Text>
             </View>
           ))}
-          {traps.map(() => null)}
 
-          {/* Realm portals */}
-          {!hub && REALM_PORTALS.map((p, i) => (
+          {/* Realm portals + layer stair */}
+          {!hub && !layerMap && REALM_PORTALS.map((p, i) => (
             <View key={`p-${i}`} style={{
               position: "absolute", left: p.col * TILE + 2, top: p.row * TILE + 2,
               width: TILE - 4, height: TILE - 4, backgroundColor: p.color,
@@ -393,10 +508,19 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
               <Text style={{ color: "#000", fontFamily: "monospace", fontWeight: "900", fontSize: 9 }}>{p.label}</Text>
             </View>
           ))}
+          {!hub && !layerMap && (
+            <View style={{
+              position: "absolute", left: LAYER_STAIR.col * TILE + 2, top: LAYER_STAIR.row * TILE + 2,
+              width: TILE - 4, height: TILE - 4, backgroundColor: LAYER_STAIR.color,
+              borderWidth: 2, borderColor: "#000", alignItems: "center", justifyContent: "center",
+            }} testID="layer-stair">
+              <Text style={{ color: "#fff", fontFamily: "monospace", fontWeight: "900", fontSize: 9 }}>{LAYER_STAIR.label}</Text>
+            </View>
+          )}
 
           {/* Realm buildings */}
-          {!hub && REALM_BUILDINGS.map((b, i) => <BuildingSprite key={i} b={b} />)}
-          {!hub && REALM_BUILDINGS.filter((b) => b.door).map((b, i) => (
+          {!hub && !layerMap && REALM_BUILDINGS.map((b, i) => <BuildingSprite key={i} b={b} />)}
+          {!hub && !layerMap && REALM_BUILDINGS.filter((b) => b.door).map((b, i) => (
             <View key={`door-${i}`} style={{
               position: "absolute", left: b.door!.col * TILE + 4, top: b.door!.row * TILE + 4,
               width: TILE - 8, height: TILE - 8, backgroundColor: "#facc15", borderWidth: 2, borderColor: "#a16207",
@@ -409,7 +533,6 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
             const badge = q ? (q.isClaimed ? "" : q.isCompleted ? "★" : q.isAccepted ? "!" : "?") : "";
             return (
               <View key={v.id} testID={`villager-${v.id}`}>
-                {/* tiny house roof on row above */}
                 <View style={{ position: "absolute", left: v.col * TILE - 2, top: (v.row - 1) * TILE + 4, width: TILE + 4, height: TILE - 4, backgroundColor: shade(v.color, -35), borderWidth: 2, borderColor: "#000" }} />
                 <View style={{ position: "absolute", left: v.col * TILE - 4, top: (v.row - 1) * TILE - 2, width: TILE + 8, height: 8, backgroundColor: shade(v.color, -55), borderWidth: 2, borderColor: "#000" }} />
                 <View style={{ position: "absolute", left: v.col * TILE + 2, top: v.row * TILE + 2 }}>
@@ -434,7 +557,7 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
             <AngelSprite facing={facing} />
           </View>
         </View>
-      </View>
+      </ScrollView>
 
       <View style={styles.controlsRow}>
         <View style={styles.dpad} testID="dpad">
@@ -451,7 +574,7 @@ function Overworld({ pos, facing, move, state, hub, trapFlash }: {
         </View>
       </View>
 
-      <Text style={styles.hint}>{hub ? "Walk into a villager's house • ▲UP tile to leave" : "Doors enter buildings • ▼ tiles descend to hubs"}</Text>
+      <Text style={styles.hint}>{layerMap ? "Walk through ▲stairs · Step on B(boss) to fight · Reach ▲UP after victory" : hub ? "Walk into a villager's house • ▲UP tile to leave" : "▼ portals → hubs · ▼L stair → Hell Layer · Doors → buildings"}</Text>
     </View>
   );
 }
@@ -897,6 +1020,76 @@ function ResultScene({ win }: { win: boolean }) {
 }
 
 // ============================================================
+// STARTER TUTORIAL OVERLAY
+// ============================================================
+const TUTORIAL_STEPS = [
+  {
+    title: "WELCOME TO BRAINROT",
+    body: "You play Angel Sahur. Your goal: descend all 9 Layers of Hell and defeat Evil Tung Tung Sahur on the Throne.",
+    hint: "Tap NEXT to continue ▶",
+  },
+  {
+    title: "MOVE & EXPLORE",
+    body: "Use the D-pad (or arrow keys / WASD on web) to walk. Doors enter buildings: ATK / DEF / SUP gacha, NPCs, and HOME (your inventory).",
+    hint: "Walking on grass has a small chance to trigger a fight.",
+  },
+  {
+    title: "BUILD YOUR SQUAD",
+    body: "Step on a gacha door and PULL for 10 ◆. You need three roles equipped from MENU → INVENTORY:\n· ATK (damage)\n· DEF (mitigates incoming hits)\n· SUP (heals during ITEM action)",
+    hint: "Element chain: Nature→Ground→Fire→Water→Nature. Light ×2 vs Dark/Boss.",
+  },
+  {
+    title: "PORTALS & THE HELL STAIR",
+    body: "▼N ▼G ▼F ▼W tiles drop you into the four Hub Villages — talk to villagers for SIDE QUESTS.\n\n▼L (red) is the LAYER STAIR — it pulls you into your current Hell Layer's walkable hellscape.",
+    hint: "Hubs reward coins. The red stair is where the real fight is.",
+  },
+  {
+    title: "INSIDE A HELL LAYER",
+    body: "Each layer is a vertical map split by walls into 3 sub-sections. Walk through ▲ stair tiles, fight encounters, then step on the B (boss) tile for a mandatory boss fight.\n\nAfter victory, the ▲UP gate at the top lets you climb back to the realm — and unlocks the next layer.",
+    hint: "Damage is hard-capped at 200 per hit.",
+  },
+  {
+    title: "COMBAT BASICS",
+    body: "· FIGHT → timing bar. Stop in the center for PERFECT ×2.5.\n· After your attack, watch the speech bubble — DODGE or PARRY the enemy reaction.\n· ITEM → SUP heals you.\n· ACT/MERCY → pacify foes Undertale-style.",
+    hint: "Save often via MENU → SAVE.",
+  },
+];
+
+function TutorialOverlay({ onClose }: { onClose: () => void }) {
+  const [idx, setIdx] = useState(0);
+  const step = TUTORIAL_STEPS[idx];
+  const last = idx === TUTORIAL_STEPS.length - 1;
+  return (
+    <View style={styles.tutorialBackdrop} testID="tutorial-overlay">
+      <View style={styles.tutorialPanel}>
+        <Text style={styles.tutorialStepNum}>STEP {idx + 1} / {TUTORIAL_STEPS.length}</Text>
+        <Text style={styles.tutorialTitle} testID="tutorial-title">{step.title}</Text>
+        <View style={styles.tutorialDivider} />
+        <Text style={styles.tutorialBody} testID="tutorial-body">{step.body}</Text>
+        <Text style={styles.tutorialHint}>· {step.hint}</Text>
+        <View style={styles.tutorialBtnRow}>
+          {idx > 0 && (
+            <Pressable testID="tutorial-prev" onPress={() => setIdx(idx - 1)} style={({ pressed }) => [styles.tutorialBtnGhost, pressed && { opacity: 0.7 }]}>
+              <Text style={styles.tutorialBtnGhostText}>◀ BACK</Text>
+            </Pressable>
+          )}
+          <Pressable testID="tutorial-skip" onPress={onClose} style={({ pressed }) => [styles.tutorialBtnGhost, pressed && { opacity: 0.7 }]}>
+            <Text style={styles.tutorialBtnGhostText}>SKIP</Text>
+          </Pressable>
+          <Pressable
+            testID={last ? "tutorial-done" : "tutorial-next"}
+            onPress={last ? onClose : () => setIdx(idx + 1)}
+            style={({ pressed }) => [styles.tutorialBtn, pressed && { backgroundColor: "#fde047" }]}
+          >
+            <Text style={styles.tutorialBtnText}>{last ? "LET'S GO ▶" : "NEXT ▶"}</Text>
+          </Pressable>
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ============================================================
 // STYLES
 // ============================================================
 const styles = StyleSheet.create({
@@ -930,6 +1123,7 @@ const styles = StyleSheet.create({
   flashText: { color: "#fff", fontFamily: "monospace", fontSize: 12, fontWeight: "800" },
 
   mapWrap: { alignItems: "center", justifyContent: "center", paddingVertical: 6 },
+  mapScroll: { flex: 1 },
   map: { borderWidth: 3, borderColor: "#000" },
   player: { width: TILE - 4, height: TILE - 4, position: "absolute" },
   bldgLabel: { color: "#fff", fontFamily: "monospace", fontWeight: "900", fontSize: 11, letterSpacing: 1 },
