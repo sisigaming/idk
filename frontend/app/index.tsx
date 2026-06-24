@@ -1157,7 +1157,7 @@ function ResultScene({ win }: { win: boolean }) {
 const TUTORIAL_STEPS = [
   {
     title: "WELCOME TO BRAINROT",
-    body: "You play Angel Sahur. Your goal: descend all 9 Layers of Hell and defeat Evil Tung Tung Sahur on the Throne.",
+    body: "You play Angel Tung. Your goal: descend all 9 Layers of Hell and defeat Evil Tung Tung Sahur on the Throne.",
     hint: "Tap NEXT to continue ▶",
   },
   {

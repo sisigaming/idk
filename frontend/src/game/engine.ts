@@ -384,7 +384,7 @@ export const stepOnTrap = (state: GameState, col: number, row: number): TrapEffe
   if (t.kind === "spike") {
     const primary = getPrimary(state);
     primary.currentHP = Math.max(1, primary.currentHP - t.value);
-    return { kind: "spike", value: t.value, message: `! Spike trap! Angel Sahur takes ${t.value} dmg.` };
+    return { kind: "spike", value: t.value, message: `! Spike trap! Angel Tung takes ${t.value} dmg.` };
   } else {
     const lost = Math.min(state.spaghettiCoins, t.value);
     state.spaghettiCoins -= lost;
@@ -464,8 +464,7 @@ const enemyAttack = (state: GameState, reactionResult: "dodge" | "parry" | "miss
     cs.primary.currentHP = Math.max(0, cs.primary.currentHP - dmg);
     const tag = m.tag === "advantage" ? " [enemy advantage]" : m.tag === "resist" ? " [you resist]" : m.tag === "super" ? " [SUPER]" : "";
     pushLog(cs, `* ${cs.enemy.name} → ${dmg} dmg${tag}${reactTag}.`);
-  }
-  cs.bubble = `${cs.enemy.name}: ${rand(["You can't escape.", "I will crush you!", "Try again, halo'd one.", "..."])}`;
+  }  cs.bubble = `${cs.enemy.name}: ${rand(["You can't escape.", "I will crush you!", "Try again, halo'd one.", "..."])}`;
   if (cs.primary.currentHP <= 0) {
     cs.ended = "lose";
     pushLog(cs, `* GAME OVER.`);

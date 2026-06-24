@@ -427,7 +427,7 @@ export const PUZZLES_BY_MAP: Record<number, PuzzleDef[]> = {
   102: [
     { id: "p2-1", col: 4, row: 4,  kind: "riddle", prompt: "Ground beats…?", choices: ["Water", "Fire", "Light", "Nature"], answer: 1, reward: 40 },
     { id: "p2-2", col: 4, row: 12, kind: "pattern", prompt: "Pattern: ▲ ■ ▲ ■ ?", choices: ["▲", "●", "■", "★"], answer: 2, reward: 45 },
-    { id: "p2-3", col: 4, row: 20, kind: "riddle", prompt: "Who is the locked starter?", choices: ["Tung Tung", "Angel Sahur", "Ballerina Cappuccina", "Tralalero"], answer: 1, reward: 50 },
+    { id: "p2-3", col: 4, row: 20, kind: "riddle", prompt: "Who is the locked starter?", choices: ["Tung Tung", "Angel Tung", "Ballerina Cappuccina", "Tralalero"], answer: 1, reward: 50 },
   ],
   103: [{ id: "p3-1", col: 4, row: 8, kind: "riddle", prompt: "Damage cap is…?", choices: ["100", "200", "500", "Infinite"], answer: 1, reward: 60 }],
   104: [{ id: "p4-1", col: 4, row: 8, kind: "riddle", prompt: "Fire counters…?", choices: ["Nature", "Ground", "Water", "Dark"], answer: 2, reward: 70 }],
@@ -500,10 +500,14 @@ export const HEIGHT_BY_MAP: Record<number, HeightDef[]> = {
     // Mid plateau (height 1) — central platform
     ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 7, height: 1 })),
     ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 6, height: 1 })),
+    ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 5, height: 1 })),
     // Top plateau (height 2) — where the puzzle + exit sit
     ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 3, height: 2 })),
     ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 2, height: 2 })),
     ...Array.from({ length: 5 }, (_, i) => ({ col: 3 + i, row: 1, height: 2 })),
+    // Ramp tiles get their own intermediate height so transitions are single-tier
+    { col: 5, row: 8, height: 1 },
+    { col: 5, row: 4, height: 2 },
   ],
   // Layer maps get gentle elevation: each sub-section is one tier higher than the last.
   101: buildLayerHeight(),
