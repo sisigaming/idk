@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Platform, Pressable, ScrollView, StyleSheet, Text, View,
+  Image, Platform, Pressable, ScrollView, StyleSheet, Text, View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -96,6 +96,22 @@ export default function Index() {
   const [facing, setFacing] = useState<Dir>("down");
   const posRef = useRef(pos);
   posRef.current = pos;
+   // --- Smooth pixel movement ---
+  const SPEED = 2;
+  const [pixelPos, setPixelPos] = useState({ x: pos.col * TILE, y: pos.row * TILE });
+  const [isMoving, setIsMoving] = useState(false);
+  const [frame, setFrame] = useState(0);
+  const heldRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    setPixelPos({ x: pos.col * TILE, y: pos.row * TILE });
+  }, [pos.col, pos.row]);
+
+  useEffect(() => {
+    if (!isMoving) { setFrame(0); return; }
+    const id = setInterval(() => setFrame((f) => (f + 1) % 4), 150);
+    return () => clearInterval(id);
+  }, [isMoving]);
   const [trapFlash, setTrapFlash] = useState<string | null>(null);
   const [showTutorial, setShowTutorial] = useState(false);
   const [gatePopup, setGatePopup] = useState<{ title: string; body: string } | null>(null);
@@ -290,85 +306,95 @@ export default function Index() {
   }, []);
 
   // Keyboard for web
+// --- NEW: Smooth pixel movement state ---
+const SPEED = 2;
+const [pixelPos, setPixelPos] = useState({ x: pos.col * TILE, y: pos.row * TILE });
+const [isMoving, setIsMoving] = useState(false);
+const [frame, setFrame] = useState(0);
+const heldRef = useRef(new Set<string>());
+
+// Sync pixel pos when grid pos changes externally (portals, map change)
 useEffect(() => {
-  if (Platform.OS !== "web") return;
-  const held = new Set<string>();
+  setPixelPos({ x: pos.col * TILE, y: pos.row * TILE });
+}, [pos.col, pos.row]);
 
-  const processMovement = () => {
-    const up = held.has("w") || held.has("arrowup");
-    const down = held.has("s") || held.has("arrowdown");
-    const left = held.has("a") || held.has("arrowleft");
-    const right = held.has("d") || held.has("arrowright");
+// Sprite animation timer
+useEffect(() => {
+  if (!isMoving) { setFrame(0); return; }
+  const id = setInterval(() => setFrame((f) => (f + 1) % 4), 150);
+  return () => clearInterval(id);
+}, [isMoving]);
 
-    const dc = (left ? -1 : 0) + (right ? 1 : 0);
-    const dr = (up ? -1 : 0) + (down ? 1 : 0);
-    if (dc === 0 && dr === 0) return;
+// Game loop (smooth 8-direction movement)
+  // Game loop (smooth 8-direction movement)
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
 
-    const dir: Dir =
-      dr === -1 && dc === -1 ? "up-left" :
-      dr === -1 && dc === 1 ? "up-right" :
-      dr === 1 && dc === -1 ? "down-left" :
-      dr === 1 && dc === 1 ? "down-right" :
-      dr === -1 ? "up" :
-      dr === 1 ? "down" :
-      dc === -1 ? "left" : "right";
+    const onDown = (e: KeyboardEvent) => {
+      const k = e.key.toLowerCase();
+      if (["w","a","s","d","arrowup","arrowdown","arrowleft","arrowright"].includes(k)) {
+        e.preventDefault();
+        heldRef.current.add(k);
+      }
+    };
+    const onUp = (e: KeyboardEvent) => {
+      heldRef.current.delete(e.key.toLowerCase());
+    };
 
-    move(dc, dr, dir);
-  };
+    const loop = setInterval(() => {
+      if (getState().scene !== "overworld") return;
+      const held = heldRef.current;
+      const up = held.has("w") || held.has("arrowup");
+      const down = held.has("s") || held.has("arrowdown");
+      const left = held.has("a") || held.has("arrowleft");
+      const right = held.has("d") || held.has("arrowright");
 
-  const onDown = (e: KeyboardEvent) => {
-    const k = e.key.toLowerCase();
-    if (["w","a","s","d","arrowup","arrowdown","arrowleft","arrowright"].includes(k)) {
-      e.preventDefault();
-      held.add(k);
-      processMovement();
-    }
-  };
+      const dcRaw = (left ? -1 : 0) + (right ? 1 : 0);
+      const drRaw = (up ? -1 : 0) + (down ? 1 : 0);
 
-  const onUp = (e: KeyboardEvent) => {
-    held.delete(e.key.toLowerCase());
-  };
+      if (dcRaw === 0 && drRaw === 0) { setIsMoving(false); return; }
+      setIsMoving(true);
 
-  window.addEventListener("keydown", onDown);
-  window.addEventListener("keyup", onUp);
-  return () => {
-    window.removeEventListener("keydown", onDown);
-    window.removeEventListener("keyup", onUp);
-  };
-}, [move]);
-  return (
-    <SafeAreaView style={styles.safe} edges={["top", "bottom"]} testID="screen-root">
-      {state.scene === "title" && <TitleScene />}
-      {state.scene === "overworld" && (
-        <Overworld pos={pos} facing={facing} move={move} state={state} hub={currentHub} layerMap={currentLayerMap} trapFlash={trapFlash} />
-      )}
-      {state.scene === "gacha" && <GachaScene />}
-      {state.scene === "dialog" && <DialogScene />}
-      {state.scene === "villager_dialog" && <VillagerDialogScene />}
-      {state.scene === "puzzle" && <PuzzleScene />}
-      {state.scene === "inventory" && <InventoryScene />}
-      {state.scene === "combat" && <CombatScene />}
-      {state.scene === "victory" && <ResultScene win />}
-      {state.scene === "defeat" && <ResultScene win={false} />}
-      {showTutorial && state.scene === "overworld" && state.currentMap === 1 && (
-        <TutorialOverlay onClose={dismissTutorial} />
-      )}
-      {gatePopup && (
-        <View style={styles.gateBackdrop} testID="gate-popup">
-          <View style={styles.gatePanel}>
-            <Text style={styles.gateTitle}>{gatePopup.title}</Text>
-            <View style={styles.gateDivider} />
-            <Text style={styles.gateBody}>{gatePopup.body}</Text>
-            <Pressable testID="gate-close" onPress={() => setGatePopup(null)} style={({ pressed }) => [styles.gateBtn, pressed && { backgroundColor: "#fde047" }]}>
-              <Text style={styles.gateBtnText}>* UNDERSTOOD</Text>
-            </Pressable>
-          </View>
-        </View>
-      )}
-    </SafeAreaView>
-  );
-}
+      const dir: Dir =
+        drRaw === -1 && dcRaw === -1 ? "up-left" :
+        drRaw === -1 && dcRaw === 1 ? "up-right" :
+        drRaw === 1 && dcRaw === -1 ? "down-left" :
+        drRaw === 1 && dcRaw === 1 ? "down-right" :
+        drRaw === -1 ? "up" :
+        drRaw === 1 ? "down" :
+        dcRaw === -1 ? "left" : "right";
 
+      setFacing(dir);
+
+      setPixelPos((prev) => {
+        const nx = prev.x + dcRaw * SPEED;
+        const ny = prev.y + drRaw * SPEED;
+
+        const newCol = Math.round(nx / TILE);
+        const newRow = Math.round(ny / TILE);
+        const oldCol = Math.round(prev.x / TILE);
+        const oldRow = Math.round(prev.y / TILE);
+
+        if (newCol !== oldCol || newRow !== oldRow) {
+          move(newCol - oldCol, newRow - oldRow, dir);
+          const currentPos = posRef.current;
+          if (currentPos.col === oldCol && currentPos.row === oldRow) {
+            return prev; // blocked
+          }
+        }
+
+        return { x: nx, y: ny };
+      });
+    }, 16);
+
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    return () => {
+      clearInterval(loop);
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
+    };
+  }, [move]);
 // ============================================================
 // TITLE SCREEN
 // ============================================================
@@ -470,12 +496,15 @@ function TitleScene() {
 // ============================================================
 // OVERWORLD
 // ============================================================
-function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash }: {
+function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash, pixelPos, frame, isMoving }: {
   pos: { col: number; row: number }; facing: Dir;
   move: (dc: number, dr: number, d: Dir) => void;
   state: GameState; hub: ReturnType<typeof findHub> | null;
   layerMap: typeof LAYER_MAPS[number] | null;
   trapFlash: string | null;
+  pixelPos: { x: number; y: number };
+  frame: number;
+  isMoving: boolean;
 }) {
   const cols = layerMap ? layerMap.cols : hub ? hub.cols : REALM_COLS;
   const rows = layerMap ? layerMap.rows : hub ? hub.rows : REALM_ROWS;
@@ -669,22 +698,47 @@ function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash }: {
             </View>
           )}
 
-          {/* Player — Y-offset by elevation, with drop shadow for 2.5D feel */}
-          {(() => {
-            const ph = getHeight(state.currentMap, pos.col, pos.row);
-            const liftY = ph * 3;
-            return (
-              <>
-                <View pointerEvents="none" style={{
-                  position: "absolute", left: pos.col * TILE + 4, top: pos.row * TILE + TILE - 4,
-                  width: TILE - 8, height: 4, borderRadius: 4, backgroundColor: "#000", opacity: 0.45,
-                }} />
-                <View style={[styles.player, { left: pos.col * TILE + 2, top: pos.row * TILE + 2 - liftY }]} testID="player-avatar">
-                  <AngelSprite facing={facing} />
-                </View>
-              </>
-            );
-          })()}
+        {/* Player — animated sprite with elevation */}
+        {(() => {
+          const ph = getHeight(state.currentMap, pos.col, pos.row);
+          const liftY = ph * 3;
+          const spriteRow =
+            (facing === "down" || facing === "down-left" || facing === "down-right") ? 0 :
+            (facing === "left" || facing === "up-left") ? 1 :
+            (facing === "right" || facing === "up-right") ? 2 : 3;
+          const SPRITE_SIZE = 32;
+          return (
+            <>
+              <View pointerEvents="none" style={{
+                position: "absolute",
+                left: pixelPos.x + 4,
+                top: pixelPos.y + TILE - 4 - liftY,
+                width: TILE - 8, height: 4, borderRadius: 4,
+                backgroundColor: "#000", opacity: 0.45,
+              }} />
+              <View style={{
+                position: "absolute",
+                left: pixelPos.x - (SPRITE_SIZE - TILE) / 2,
+                top: pixelPos.y - liftY - (SPRITE_SIZE - TILE),
+                width: SPRITE_SIZE,
+                height: SPRITE_SIZE,
+                overflow: "hidden",
+              }} testID="player-avatar">
+                <Image
+                  source={require("@/assets/angel_walk.png")}
+                  style={{
+                    width: SPRITE_SIZE * 4,
+                    height: SPRITE_SIZE * 4,
+                    transform: [
+                      { translateX: -(isMoving ? frame : 0) * SPRITE_SIZE },
+                      { translateY: -spriteRow * SPRITE_SIZE },
+                    ],
+                  }}
+                />
+              </View>
+            </>
+          );
+        })()}
         </View>
       </ScrollView>
 
