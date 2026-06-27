@@ -19,8 +19,7 @@ import { storage } from "@/src/utils/storage";
 
 // ============================================================
 const TILE = 22;
-type Dir = "up" | "down" | "left" | "right";
-
+type Dir = "up" | "down" | "left" | "right" | "up-left" | "up-right" | "down-left" | "down-right";
 // ----- HEIGHT HELPERS -----
 const getHeight = (mapId: number, col: number, row: number): number => {
   const arr = HEIGHT_BY_MAP[mapId] ?? [];
@@ -291,19 +290,52 @@ export default function Index() {
   }, []);
 
   // Keyboard for web
-  useEffect(() => {
-    if (Platform.OS !== "web") return;
-    const onKey = (e: KeyboardEvent) => {
-      const k = e.key.toLowerCase();
-      if (k === "arrowup" || k === "w")    { e.preventDefault(); move(0, -1, "up"); }
-      else if (k === "arrowdown" || k === "s")  { e.preventDefault(); move(0, 1, "down"); }
-      else if (k === "arrowleft" || k === "a")  { e.preventDefault(); move(-1, 0, "left"); }
-      else if (k === "arrowright" || k === "d") { e.preventDefault(); move(1, 0, "right"); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [move]);
+useEffect(() => {
+  if (Platform.OS !== "web") return;
+  const held = new Set<string>();
 
+  const processMovement = () => {
+    const up = held.has("w") || held.has("arrowup");
+    const down = held.has("s") || held.has("arrowdown");
+    const left = held.has("a") || held.has("arrowleft");
+    const right = held.has("d") || held.has("arrowright");
+
+    const dc = (left ? -1 : 0) + (right ? 1 : 0);
+    const dr = (up ? -1 : 0) + (down ? 1 : 0);
+    if (dc === 0 && dr === 0) return;
+
+    const dir: Dir =
+      dr === -1 && dc === -1 ? "up-left" :
+      dr === -1 && dc === 1 ? "up-right" :
+      dr === 1 && dc === -1 ? "down-left" :
+      dr === 1 && dc === 1 ? "down-right" :
+      dr === -1 ? "up" :
+      dr === 1 ? "down" :
+      dc === -1 ? "left" : "right";
+
+    move(dc, dr, dir);
+  };
+
+  const onDown = (e: KeyboardEvent) => {
+    const k = e.key.toLowerCase();
+    if (["w","a","s","d","arrowup","arrowdown","arrowleft","arrowright"].includes(k)) {
+      e.preventDefault();
+      held.add(k);
+      processMovement();
+    }
+  };
+
+  const onUp = (e: KeyboardEvent) => {
+    held.delete(e.key.toLowerCase());
+  };
+
+  window.addEventListener("keydown", onDown);
+  window.addEventListener("keyup", onUp);
+  return () => {
+    window.removeEventListener("keydown", onDown);
+    window.removeEventListener("keyup", onUp);
+  };
+}, [move]);
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]} testID="screen-root">
       {state.scene === "title" && <TitleScene />}
