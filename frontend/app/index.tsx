@@ -698,7 +698,7 @@ function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash, pixelPo
             </View>
           )}
 
-        {/* Player — animated sprite with elevation */}
+          {/* Player — animated sprite with elevation */}
         {(() => {
           const ph = getHeight(state.currentMap, pos.col, pos.row);
           const liftY = ph * 3;
@@ -706,7 +706,11 @@ function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash, pixelPo
             (facing === "down" || facing === "down-left" || facing === "down-right") ? 0 :
             (facing === "left" || facing === "up-left") ? 1 :
             (facing === "right" || facing === "up-right") ? 2 : 3;
-          const SPRITE_SIZE = 32;
+          const SPRITE_W = 352;
+          const SPRITE_H = 192;
+          const SCALE = 0.15;
+          const displayW = SPRITE_W * SCALE;
+          const displayH = SPRITE_H * SCALE;
           return (
             <>
               <View pointerEvents="none" style={{
@@ -718,20 +722,20 @@ function Overworld({ pos, facing, move, state, hub, layerMap, trapFlash, pixelPo
               }} />
               <View style={{
                 position: "absolute",
-                left: pixelPos.x - (SPRITE_SIZE - TILE) / 2,
-                top: pixelPos.y - liftY - (SPRITE_SIZE - TILE),
-                width: SPRITE_SIZE,
-                height: SPRITE_SIZE,
+                left: pixelPos.x - (displayW - TILE) / 2,
+                top: pixelPos.y - liftY - (displayH - TILE),
+                width: displayW,
+                height: displayH,
                 overflow: "hidden",
               }} testID="player-avatar">
                 <Image
                   source={require("@/assets/angel_walk.png")}
                   style={{
-                    width: SPRITE_SIZE * 4,
-                    height: SPRITE_SIZE * 4,
+                    width: SPRITE_W * 4 * SCALE,
+                    height: SPRITE_H * 4 * SCALE,
                     transform: [
-                      { translateX: -(isMoving ? frame : 0) * SPRITE_SIZE },
-                      { translateY: -spriteRow * SPRITE_SIZE },
+                      { translateX: -(isMoving ? frame : 0) * displayW },
+                      { translateY: -spriteRow * displayH },
                     ],
                   }}
                 />
